@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>函证助手 — 往来款项函证清单与询证函</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="top">
+  <h1>函证助手</h1>
+  <p class="sub">从往来余额表里挑出要函证的单位，生成函证控制表和询证函。全部在本机完成，文件不上传。</p>
+</header>
+
+<main>
+
+  <section class="card">
+    <h2><span class="no">1</span> 上传往来余额表</h2>
+    <p class="hint">
+      需要一列「单位名称（客户/供应商）」和一列「期末余额」。科目、账号有的话会一起带出来。<br>
+      没有文件？<button type="button" class="link" id="demoBtn">用示例数据试一下</button>
+    </p>
+    <div class="row">
+      <div class="field">
+        <label for="file">选择 Excel 文件</label>
+        <input type="file" id="file" accept=".xlsx,.xls,.csv">
+      </div>
+      <div class="field grow">
+        <label>识别结果</label>
+        <div class="info" id="fileInfo">还没有文件</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2><span class="no">2</span> 选样</h2>
+    <div class="row">
+      <div class="field">
+        <label for="selMode">怎么挑</label>
+        <select id="selMode">
+          <option value="mixed">大额全要，其余随机补足（推荐）</option>
+          <option value="threshold">只要超过金额的</option>
+          <option value="sample">纯随机抽</option>
+          <option value="all">全部都要</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="threshold">金额门槛（元）</label>
+        <input type="text" id="threshold" value="500000" inputmode="decimal">
+      </div>
+      <div class="field">
+        <label for="sampleSize">总共抽几户</label>
+        <input type="number" id="sampleSize" value="10" min="0" step="1">
+      </div>
+      <div class="field">
+        <label for="seed">随机种子</label>
+        <input type="number" id="seed" value="1" min="1" step="1">
+        <span class="tip">同一个种子抽出来的是同一批，方便复核</span>
+      </div>
+    </div>
+    <div id="statBox"></div>
+  </section>
+
+  <section class="card">
+    <h2><span class="no">3</span> 核对后生成</h2>
+    <div class="row">
+      <div class="field">
+        <label for="clientName">被审计单位</label>
+        <input type="text" id="clientName" placeholder="写进询证函和文件名">
+      </div>
+      <div class="field">
+        <label for="cutOff">截止日</label>
+        <input type="text" id="cutOff" placeholder="例如 2026-06-30">
+      </div>
+    </div>
+
+    <div id="listPanel" class="hidden">
+      <p class="hint">取消勾选＝这户不发函（比如已经结清、或者对方是小额关联方）。</p>
+      <div id="listBox" class="scroll"></div>
+    </div>
+
+    <div class="row actions">
+      <button type="button" class="primary" id="genControl" disabled>生成函证控制表（Excel）</button>
+      <button type="button" class="primary" id="genLetter" disabled>生成询证函（打印版）</button>
+    </div>
+    <div class="info" id="genInfo"></div>
+  </section>
+
+  <details class="card about">
+    <summary>这个工具怎么算、不算什么</summary>
+    <ul>
+      <li>金额按「分」的整数算，显示才变元，不会出现 0.1+0.2 那种尾差。</li>
+      <li>同名单位挂多个科目的会合并成一户，金额相加——函证是按对方单位发的，不是按科目。</li>
+      <li>读不出金额、或者有金额没单位名称的行，会单独报出来，不会悄悄丢掉。</li>
+      <li>「合计」行自动跳过，不当成一家单位。</li>
+      <li>它只负责挑和出函，<b>回函登记和差异调节要你自己填</b>——控制表里那几列是留空的，不预填假数据。</li>
+      <li>询证函是按企业往来款项的通用格式出的。银行询证函有固定格式（含借款、担保等十四项），不在这里。</li>
+      <li>不上传任何数据：文件只在你的浏览器里读。</li>
+    </ul>
+  </details>
+
+</main>
+
+<footer class="foot">
+  <span>函证助手 <b id="verText">v0.1.0</b></span>
+  <span>离线单页 · 数据不出本机</span>
+</footer>
+
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
