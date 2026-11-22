@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.7';
+  var VERSION = '0.1.8';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,6 +81,16 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
+  /** 整行任意一格写着合计/小计，就把这行当合计行——
+   *  「合计」经常写在序号列或跨列合并，不一定落在名称列 */
+  function isTotalRow(row) {
+    for (var i = 0; i < (row || []).length; i++) {
+      var s = str(row[i]);
+      if (s && isTotalName(s)) return true;
+    }
+    return false;
+  }
+
   function isTotalName(name) {
     var raw = norm(name).replace(/(人民币|万元|元)$/, '');
     if (!raw) return false;
@@ -126,6 +136,8 @@
     if (UNIT_LABEL.test(t)) return { role: 'unit' };
     if (FLOW_WORDS.test(t)) return { role: 'flow' };
     if (DIR_WORDS.test(t)) return { role: 'dir' };
+    // 金蝶把往来单位叫「核算项目」，它就是函证对象
+    if (/核算项目|辅助核算/.test(t)) return { role: 'name', rank: 2 };
     if (CODE_WORDS.test(t)) return { role: 'code' };
     // 「科目名称」两重身份：既是科目，也可能是这张表里唯一的名字列（科目余额表）
     if (SUBJECT_WORDS.test(t)) {
@@ -301,25 +313,29 @@
     var problems = [];
     var span = best.span;
 
-    // 金额单位不再自动换算：猜错就是一万倍的错。
-    // 见到「万元/千元/百万元」直接拒绝，让使用者先把表换成元。
+    // 金额单位只认元。见到万元/千元/百万元（连同单位、金额、余额这类词）就拒绝：
+    // 自动换算猜错就是一万倍的差错。页脚、列名后缀、注释里写的也算。
     var unitWord = '';
-    for (var ur = 0; ur <= best.rowIndex; ur++) {
-      ((rows[ur] || [])).forEach(function (cell) {
-        var s = str(cell);
-        if (!s) return;
-        // 只有「单位：万元」这种标注才算；正文里提到「100 万元」不算
-        var unitHit = /(单位|计量单位|金额单位)\s*[:：]?\s*[（(]?\s*(百万元|万元|千元)/.exec(s);
-        if (unitHit && !unitWord) unitWord = unitHit[2];
-      });
+    for (var ur = 0; ur < rows.length && !unitWord; ur++) {
+      var cells = rows[ur] || [];
+      for (var uc = 0; uc < cells.length; uc++) {
+        var us = str(cells[uc]);
+        if (!us) continue;
+        var um = /(百万元|万元|千元)/.exec(us);
+        if (!um) continue;
+        // 「注：超过100万元的客户请重点函证」这类正文不算声明
+        if (/(单位|金额|余额|计量|为)\s*[:：]?\s*[（(]?\s*(百万元|万元|千元)/.test(us)) {
+          unitWord = um[1];
+          break;
+        }
+      }
     }
-
     // 名称列：客户/单位优先，其次泛称，最后才是科目名称
     var nameCol = cols.name.slice().sort(function (x, y) {
       return y.rank - x.rank || x.c - y.c;
     })[0].c;
     var nameHead = norm((rows[best.rowIndex] || [])[nameCol]);
-    var nameIsCounterparty = /单位|客户|供应商|户名|往来/.test(nameHead);
+    var nameIsCounterparty = /单位|客户|供应商|户名|往来|核算项目/.test(nameHead);
 
     var picked = pickAmount(cols.amount);
     var flowOnly = !!(picked && picked.flowOnly);
@@ -335,7 +351,7 @@
     // 「日期 + 期初余额 + 期末余额」是带日期的余额表；
     // 只有出现「没写期间的金额」或借贷/发生额列，才是流水
     var hasUnlabeledAmt = cols.amount.some(function (a) { return !a.balWord && !a.period; });
-    var isFlow = cols.flow.length > 0 && (sidedOrFlowAmt || (cols.amount.length >= 2 && hasUnlabeledAmt));
+    var isFlow = cols.flow.length > 0 && (sidedOrFlowAmt || hasUnlabeledAmt);
     // 只有期初余额：函证要的是截止日余额，期初会误导
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
@@ -355,15 +371,18 @@
     }
 
     // 宽表：好几列「…余额」并列、又没有总的「期末余额」列 —— 分不清该函哪个科目
+    var headOf = function (a) {
+      // 去掉「（元）」「人民币」这类后缀再判断
+      return norm((rows[best.rowIndex] || [])[a.c]).replace(/(人民币|元)$/, '');
+    };
+    var PERIOD_ONLY = /^(期初余额|年初余额|期初金额|期初|期末余额|年末余额|余额|期末数|期末金额|金额|期末)$/;
     var balCols = cols.amount.filter(function (a) { return a.kind === 'balance' && !a.side; });
-    var hasGeneric = balCols.some(function (a) {
-      var h = norm((rows[best.rowIndex] || [])[a.c]);
-      return /^(期末余额|余额|期末数|金额)$/.test(h);
-    });
-    var isWide = balCols.length >= 2 && !hasGeneric;
+    var hasGeneric = balCols.some(function (a) { return PERIOD_ONLY.test(headOf(a)); });
+    var subjBalCols = balCols.filter(function (a) { return !PERIOD_ONLY.test(headOf(a)); });
+    var isWide = subjBalCols.length >= 2 && !hasGeneric;
     if (isWide) {
-      problems.push('这张表有 ' + balCols.length + ' 列余额（' + balCols.map(function (a) {
-        return norm((rows[best.rowIndex] || [])[a.c]);
+      problems.push('这张表有 ' + subjBalCols.length + ' 列科目余额（' + subjBalCols.map(function (a) {
+        return headOf(a);
       }).join('、') + '），分不清该函哪一列——请只保留要函证的那一列，或加一列「期末余额」。');
     }
     if (flowOnly) problems.push('这张表只有「发生额」，没有余额——函证金额通常取余额，请换成余额表');
@@ -429,10 +448,9 @@
       else name = lastByCol[header.nameCol] || '';
       var subject = '', rawSubject = '';
       if (header.subjectCol >= 0) {
+        // 科目不沿用：合并或留空时记成「未填科目」，比把钱记到上一行科目头上诚实
         subject = str(row[header.subjectCol]).trim();
         rawSubject = subject;
-        if (subject) lastByCol[header.subjectCol] = subject;
-        else subject = lastByCol[header.subjectCol] || '';
       }
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
 
@@ -476,7 +494,7 @@
       // 整行都空的才算空行——用原始值判断，不能用沿用后的名称
       var blank = !rawName && str(rawAmount).trim() === '' && !rawSubject && !code;
       if (blank) continue;
-      if (isTotalName(name)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name }); continue; }
+      if (isTotalRow(row)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
 
       if (!name) {
         if (cents !== null && cents !== 0) {

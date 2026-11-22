@@ -345,7 +345,7 @@
 
   /* ---------------- 事件 ---------------- */
 
-  /** 把工作簿里所有能用的表列出来，默认选评分最高的那张 */
+  /** 把工作簿里所有能用的表列出来，默认选评分最高的那张；返回提示文字 */
   function fillSheetSelect(wb, picked) {
     var sel = $('sheetSel');
     var usable = [];
@@ -360,9 +360,10 @@
         (n === picked ? ' selected' : '') + '>' + label + '</option>';
     }).join('');
     sel.disabled = wb.SheetNames.length <= 1;
-    if (usable.length > 1) {
-      $('fileInfo').textContent += ' · 还有 ' + (usable.length - 1) + ' 张表也能用，可在左边切换';
-    }
+    // 提示文字交回调用方，避免被随后的「文件名 · 表名」整句覆盖
+    return usable.length > 1
+      ? ' · 还有 ' + (usable.length - 1) + ' 张表也能用，可在左边切换'
+      : '';
   }
 
   $('sheetSel').addEventListener('change', function () {
@@ -406,9 +407,9 @@
       $('clientName').value = '';
       $('cutOff').value = '';
       state.wb = res.wb;
-      fillSheetSelect(res.wb, pick.name);
+      var sheetHint = fillSheetSelect(res.wb, pick.name);
       setWorkbook(res, pick);
-      $('fileInfo').textContent = res.fileName + ' · ' + pick.name;
+      $('fileInfo').textContent = res.fileName + ' · ' + pick.name + sheetHint;
       $('listPanel').classList.remove('hidden');
       parse();
       recompute();

@@ -394,6 +394,51 @@ eq(d1.usable, true, '带日期的两列余额表可以用');
 const d2 = Core.detectHeader([['日期', '客户名称', '摘要', '金额', '余额'], ['2026-01-05', '华远', '收款', 1000, 1000]]);
 eq(d2.usable, false, '日期 + 金额 + 余额 才是流水');
 
+
+console.log('\n[第八轮 1 合计写在编码列/科目列，不能加到最后一户]');
+const t1rows = [['客户编码', '客户名称', '期末余额'], ['001', '华远', 1000], ['002', '东方', 500], ['合计', '', 1500]];
+const t1 = Core.mergeByName(Core.parseRows(t1rows, Core.detectHeader(t1rows), {}).entities);
+eq(t1.filter(e => e.name === '东方')[0].cents, 50000, '东方 500，不是 2,000');
+const t1b = [['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000], ['东方', '应收账款', 500], ['', '合计', 1500]];
+const t1bm = Core.mergeByName(Core.parseRows(t1b, Core.detectHeader(t1b), {}).entities);
+eq(t1bm.filter(e => e.name === '东方')[0].cents, 50000, '合计在科目列也一样跳过');
+
+console.log('\n[第八轮 2 日期 + 单列「金额」是流水]');
+eq(Core.detectHeader([['日期', '客户名称', '摘要', '金额'], ['2026-01-05', '华远', '收款', 1000]]).usable, false,
+  '单列金额的流水账也要拒');
+
+console.log('\n[第八轮 3 万元声明的各种写法都要拦住]');
+const uu1 = Core.detectHeader([['往来余额表'], ['注：本表金额单位为万元'], ['单位名称', '期末余额'], ['华远', 128.64]]);
+eq(uu1.usable, false, '「金额单位为万元」要拒');
+const uu2 = Core.detectHeader([['客户名称', '期末余额（万元）'], ['华远', 128.64]]);
+eq(uu2.usable, false, '列名后缀（万元）要拒');
+const uu3 = Core.detectHeader([['单位名称', '期末余额'], ['华远', 1286400.5], ['单位：万元']]);
+eq(uu3.usable, false, '页脚的单位声明也要拒');
+const uu4 = Core.detectHeader([['往来余额表（单位：元）'], ['注：超过100万元的客户请重点函证'], ['单位名称', '期末余额'], ['华远', 1286400.5]]);
+eq(uu4.usable, true, '正文提到「100万元」不算声明');
+
+console.log('\n[第八轮 4 期初 + 期末（元）不能用「分不清」拒掉]');
+const g1 = Core.detectHeader([['客户名称', '期初余额', '期末余额（元）'], ['华远', 800, 1000]]);
+eq(g1.usable, true, '期末余额（元）算通用列');
+const g2 = Core.detectHeader([['客户名称', '年初余额', '年末余额'], ['华远', 800, 1000]]);
+eq(g2.usable, true, '年初 + 年末是一对期间，不是多列科目余额');
+const g3 = Core.detectHeader([['客户名称', '应收账款余额', '预收账款余额'], ['华远', 1000, -200]]);
+eq(g3.usable, false, '真的多列科目余额仍然要拒');
+
+console.log('\n[第八轮 5 科目留空要记「未填科目」，不能顶上一行的科目]');
+const e5rows = [['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000000], ['', '预收账款', -300000], ['', '', 200000]];
+const e5parse = Core.parseRows(e5rows, Core.detectHeader(e5rows), {});
+const e5m = Core.mergeByName(e5parse.entities);
+eq(e5m[0].cents, 90000000, '合计 900,000 不变');
+eq(e5m[0].noSubjectCents, 20000000, '200,000 记到「未填科目」，不顶预收账款');
+
+console.log('\n[第八轮 6 金蝶「核算项目」是往来单位]');
+const k1 = Core.detectHeader([['核算项目', '期末余额'], ['华远科技有限公司', 1000]]);
+eq(k1.usable, true, '核算项目当名字列');
+eq(k1.nameCol, 0, '名字列就是核算项目');
+const k2 = Core.detectHeader([['科目编码', '科目名称', '核算项目', '期末余额'], ['1122', '应收账款', '华远', 1000]]);
+eq(k2.usable, true, '带科目编码的辅助核算表也能用');
+
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
