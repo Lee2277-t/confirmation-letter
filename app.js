@@ -34,25 +34,8 @@
   function sheetRows(wb, name) {
     var ws = wb.Sheets[name];
     if (!ws) return [];
-    // 合并单元格：Excel 只把值放在左上角，其余格子是空。
-    // 客户名按单位合并（一家占好几行科目）时，下面几行会被当成「没有单位名称」丢掉。
-    if (ws['!merges'] && XLSX.utils.encode_cell) {
-      ws['!merges'].forEach(function (m) {
-        var src = ws[XLSX.utils.encode_cell({ r: m.s.r, c: m.s.c })];
-        if (!src || src.v === undefined || src.v === null) return;
-        for (var rr = m.s.r; rr <= m.e.r; rr++) {
-          for (var cc = m.s.c; cc <= m.e.c; cc++) {
-            if (rr === m.s.r && cc === m.s.c) continue;
-            var addr = XLSX.utils.encode_cell({ r: rr, c: cc });
-            var cur = ws[addr];
-            if (!cur || cur.v === undefined || cur.v === null || cur.v === '') {
-              ws[addr] = { t: src.t, v: src.v };
-            }
-          }
-        }
-      });
-    }
-    // 错误值（#REF!）在 raw 模式下是 null，和空格子分不清，先换成文字
+    // 合并单元格不在这里填：填了会把「金额」抄到每一行，同一笔钱被加好几遍。
+    // 名称列的空白由 parseRows 的「沿用上一个名称」处理，金额列一律不填。    // 错误值（#REF!）在 raw 模式下是 null，和空格子分不清，先换成文字
     Object.keys(ws).forEach(function (addr) {
       if (addr.charAt(0) === '!') return;
       var cell = ws[addr];
@@ -362,6 +345,46 @@
 
   /* ---------------- 事件 ---------------- */
 
+  /** 把工作簿里所有能用的表列出来，默认选评分最高的那张 */
+  function fillSheetSelect(wb, picked) {
+    var sel = $('sheetSel');
+    var usable = [];
+    wb.SheetNames.forEach(function (name) {
+      var rows = sheetRows(wb, name);
+      var h = Core.detectHeader(rows);
+      if (h.rowIndex >= 0 && h.usable !== false) usable.push(name);
+    });
+    sel.innerHTML = wb.SheetNames.map(function (n) {
+      var label = n + (usable.indexOf(n) >= 0 ? '' : '（认不出）');
+      return '<option value="' + n.replace(/"/g, '&quot;') + '"' +
+        (n === picked ? ' selected' : '') + '>' + label + '</option>';
+    }).join('');
+    sel.disabled = wb.SheetNames.length <= 1;
+    if (usable.length > 1) {
+      $('fileInfo').textContent += ' · 还有 ' + (usable.length - 1) + ' 张表也能用，可在左边切换';
+    }
+  }
+
+  $('sheetSel').addEventListener('change', function () {
+    if (!state.wb) return;
+    var name = $('sheetSel').value;
+    var rows = sheetRows(state.wb, name);
+    var h = Core.detectHeader(rows);
+    if (h.rowIndex < 0 || h.usable === false) {
+      clearAll('这张表认不出：' + (h.problems[0] || '找不到表头'));
+      return;
+    }
+    state.sheetName = name;
+    state.rows = rows;
+    state.header = h;
+    state.origin = sheetOrigin(state.wb, name);
+    state.excluded = {};
+    state.forced = {};
+    parse();
+    recompute();
+    $('fileInfo').textContent = state.fileName + ' · ' + name;
+  });
+
   $('file').addEventListener('change', function (e) {
     var f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -382,6 +405,8 @@
       // 换了一家客户，上一家的单位名和截止日不能留着，否则函会盖错名字
       $('clientName').value = '';
       $('cutOff').value = '';
+      state.wb = res.wb;
+      fillSheetSelect(res.wb, pick.name);
       setWorkbook(res, pick);
       $('fileInfo').textContent = res.fileName + ' · ' + pick.name;
       $('listPanel').classList.remove('hidden');

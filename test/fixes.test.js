@@ -358,10 +358,42 @@ const s5rows = [['客户名称', '期初方向', '期初余额', '期末方向',
 const s5 = Core.parseRows(s5rows, Core.detectHeader(s5rows), {});
 eq(s5.entities[0].cents, -100000, '按期末方向（贷）取负数');
 
-console.log('\n[第六轮 6 标题写「单位：万元」要换算]');
+console.log('\n[第六轮 6 非元单位一律拒绝，不自动换算]');
 const s6rows = [['往来余额表（单位：万元）'], ['单位名称', '期末余额'], ['华远', 128.64]];
-const s6 = Core.parseRows(s6rows, Core.detectHeader(s6rows), {});
-eq(s6.entities[0].cents, 128640000, '128.64 万元 = 1,286,400.00 元');
+const s6h = Core.detectHeader(s6rows);
+eq(s6h.usable, false, '万元单位的表要拒绝（自动换算猜错就是一万倍）');
+ok(s6h.problems.some(p => /万元/.test(p)), '要说清楚是单位的问题');
+
+console.log('\n[第七轮 1 非元单位一律拒绝]');
+const u1 = Core.detectHeader([['往来余额表（单位：元）'], ['注：超过100万元的客户请重点函证'], ['单位名称', '期末余额'], ['华远', 1286400.5]]);
+eq(u1.usable, true, '正文提到「100万元」不算单位标注');
+const u2 = Core.detectHeader([['往来余额表（单位：万元）'], ['单位名称', '期末余额'], ['华远', 128.64]]);
+eq(u2.usable, false, '标题写万元要拒绝');
+const u3 = Core.detectHeader([['往来余额表', '', '', '单位：千元'], ['单位名称', '期末余额'], ['华远', 128.64]]);
+eq(u3.usable, false, '标题行里的「单位：千元」也要拒绝，不能把它当名称列');
+
+console.log('\n[第七轮 2 宽表多列余额要拒绝，不能猜]');
+const w1 = Core.detectHeader([['客户名称', '应收账款余额', '预收账款余额', '其他应收余额'], ['华远', 1000, -200, 50]]);
+eq(w1.usable, false, '三列余额并列，分不清该函哪列');
+ok(w1.problems.some(p => /分不清/.test(p)), '要说明为什么');
+const w2 = Core.detectHeader([['客户名称', '坏账准备余额', '期末余额'], ['华远', -50, 1000]]);
+eq(w2.usable, true, '有总的「期末余额」列时照常可用');
+
+console.log('\n[第七轮 3 名称区块沿用，金额绝不沿用]');
+const blkRows = [['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000], ['', '预收账款', -300], ['东方', '应收账款', 500]];
+const blk = Core.parseRows(blkRows, Core.detectHeader(blkRows), {});
+const blkM = Core.mergeByName(blk.entities);
+eq(blkM.filter(e => e.name === '华远')[0].cents, 70000, '华远 700（1,000 − 300）');
+eq(blkM.length, 2, '还是两家（空名称沿用华远）');
+const f3b = Core.parseRows([['单位名称', '期末余额'], ['', 500]], Core.detectHeader([['单位名称', '期末余额'], ['', 500]]), {});
+eq(f3b.entities.length, 0, '开头没名字的行不猜');
+
+console.log('\n[第七轮 4 日期 + 期初 + 期末是余额表，不是流水]');
+const d1 = Core.detectHeader([['客户名称', '最后交易日期', '期初余额', '期末余额'], ['华远', '2026-05-20', 800, 1000]]);
+eq(d1.usable, true, '带日期的两列余额表可以用');
+const d2 = Core.detectHeader([['日期', '客户名称', '摘要', '金额', '余额'], ['2026-01-05', '华远', '收款', 1000, 1000]]);
+eq(d2.usable, false, '日期 + 金额 + 余额 才是流水');
+
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

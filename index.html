@@ -26,6 +26,10 @@
         <label for="file">选择 Excel 文件</label>
         <input type="file" id="file" accept=".xlsx,.xls,.csv">
       </div>
+      <div class="field">
+        <label for="sheetSel">工作表</label>
+        <select id="sheetSel" disabled><option>（还没有文件）</option></select>
+      </div>
       <div class="field grow">
         <label>识别结果</label>
         <div class="info" id="fileInfo">还没有文件</div>
@@ -103,7 +107,7 @@
 </main>
 
 <footer class="foot">
-  <span>函证助手 <b id="verText">v0.1.6</b></span>
+  <span>函证助手 <b id="verText">v0.1.7</b></span>
   <span>离线单页 · 数据不出本机</span>
 </footer>
 

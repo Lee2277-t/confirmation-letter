@@ -84,7 +84,7 @@ const rows5 = [
 const p5 = Core.parseRows(rows5, Core.detectHeader(rows5), { firstExcelRow: 1 });
 eq(p5.entities.length, 1, '只有甲公司能读出来');
 eq(p5.entities[0].cents, 120000, '金额换成以分计的整数');
-eq(p5.skipped.filter(s => s.reason === '金额读不出').length, 1, '乙公司金额读不出，要单独报');
+eq(p5.skipped.filter(s => s.reason === '金额读不出' && s.name === '乙公司').length, 1, '乙公司金额读不出，要单独报');
 eq(p5.skipped.filter(s => s.reason === '金额读不出')[0].name, '乙公司', '报的是哪一家');
 ok(p5.problems.some(p => /金额读不出/.test(p)), '问题里要有提示');
 
@@ -94,8 +94,12 @@ const rows6 = [
   ['', 500]
 ];
 const p6 = Core.parseRows(rows6, Core.detectHeader(rows6), { firstExcelRow: 1 });
-eq(p6.entities.length, 1, '没名字的行不进清单');
-ok(p6.skipped.some(s => s.reason === '没有单位名称' && s.cents === 50000), '有金额没名字必须报出来');
+// 名称列按区块合并时，下面几行是空的；沿用上一个名称，钱不能丢
+eq(p6.entities.length, 2, '空名称的行沿用了上一行的单位');
+eq(Core.mergeByName(p6.entities)[0].cents, 60000, '甲公司合计 600（100 + 500）');
+const p6b = Core.parseRows([['单位名称', '期末余额'], ['', 500]], Core.detectHeader([['单位名称', '期末余额'], ['', 500]]), {});
+eq(p6b.entities.length, 0, '开头就没有名字的行仍然不猜');
+ok(p6b.skipped.some(s => s.reason === '没有单位名称' && s.cents === 50000), '并且要报出来');
 
 const rows7 = [['单位名称', '期末余额'], ['甲公司', 100], ['小计', 100], ['合  计', 100]];
 const p7 = Core.parseRows(rows7, Core.detectHeader(rows7), {});
