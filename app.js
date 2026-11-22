@@ -60,8 +60,7 @@
 
   /**
    * 多张表都能读时挑哪张。
-   * 关键是「余额表」优先于「流水/发生额表」——流水表行数多得多，
-   * 只按行数挑会把整批函做成用发生额出的。
+   * 优先选余额表。同为余额表时，先看有没有流水列，再看行数。
    */
   function pickSheet(wb) {
     var best = null, usable = [], why = '';
@@ -73,7 +72,9 @@
         return;
       }
       usable.push(name);
-      sheet.score = 100 + (h.amountKind === '余额' ? 30 : 0) + Math.min(sheet.rowCount, 2000) / 1000;
+      // 行数最多加 2 分，无流水列的表加 3 分。
+      sheet.score = 100 + (h.amountKind === '余额' ? 30 : 0) + (h.hasFlowColumns ? 0 : 3) +
+        Math.min(sheet.rowCount, 2000) / 1000;
       if (!best || sheet.score > best.score) best = sheet;
     });
     return { best: best, usable: usable, why: why };

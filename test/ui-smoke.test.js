@@ -358,8 +358,15 @@ async function loadFile(rows, sheetName, merge) {
     balanceRows.some(row => row.includes('>东方</td>') && row.includes('>500.00</td>')) &&
     balanceRows.some(row => row.includes('>海岚</td>') && row.includes('>200.00</td>')),
     'N1 列表显示华远 1,000 元、东方 500 元和海岚 200 元');
-  ok(/跳过 2 行合计行/.test(el('statBox').innerHTML), 'N1 在选样统计中显示跳过两行合计');
+  const totalNotice = el('statBox').innerHTML;
+  ok(/跳过 2 行合计行/.test(totalNotice), 'N1 在选样统计中显示跳过两行合计');
+  ok(totalNotice.includes('第 3 行 1,000.00 元、第 5 行 500.00 元'),
+    'M1 跳过提示逐行显示原表行号和金额');
   ok(!el('genControl').disabled && !el('genLetter').disabled, 'N1 首列备注合计不触发歧义拒收，两种导出均可用');
+
+  await loadFile([['备注', '客户名称', '期末余额'], ['收款', '华远', 1000], ['合计', '东方', 500000]], '首列备注');
+  ok(/>东方<\/td>[\s\S]*?>500,000\.00<\/td>/.test(el('listBox').innerHTML), 'M1 有名且与累计不符的合计备注行显示在明细中');
+  ok(!/跳过.*合计行/.test(el('statBox').innerHTML), 'M1 正常明细不提示为跳过的合计行');
 
   console.log('\n[同样的凭证列，每户一行可读，同户多笔提示台账]');
   const voucherRows = [['客户名称', '日期', '凭证号', '摘要', '余额'],
@@ -372,6 +379,29 @@ async function loadFile(rows, sheetName, merge) {
   await loadFile(voucherRows.concat([['华远', '2026-06-12', '记-003', '调整', 1300]]), '待核对');
   ok(/逐笔明细台账/.test(el('fileInfo').textContent), 'N2 同户多笔时提示逐笔明细台账');
   ok(el('genControl').disabled && el('genLetter').disabled, 'N2 同户多笔拒收后停用两种导出');
+
+  await loadFile([voucherRows[0], ['华远-北京', '2026-06-12', '记-003', '收货款', 1300], ...voucherRows.slice(1)], '异名台账');
+  ok(/逐笔明细台账/.test(el('fileInfo').textContent), 'M2 带后缀的名称排在前面时也提示逐笔明细台账');
+  ok(el('genControl').disabled && el('genLetter').disabled, 'M2 异名台账停用两种导出');
+
+  console.log('\n[M3 有流水列的可用表不会抢占余额表]');
+  for (const [detailCount, balanceCount, balanceTotal] of [[40, 2, '1,500,000.00'], [3, 3, '1,500,800.00']]) {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([voucherRows[0],
+      ...Array.from({ length: detailCount }, (_, i) => ['客户' + i, '2026-06-08', '记-' + i, '收货款', 1000 + i])]), '逐笔明细');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['单位名称', '期末余额'], ['华远', 1000000], ['东方', 500000], ['海岚', 800]
+    ].slice(0, balanceCount + 1)), '余额表');
+    payload = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+    el('file').files = [{ name: '两表.xlsx' }];
+    fire('file', 'change');
+    await sleep(120);
+    ok(/value="余额表" selected/.test(el('sheetSel').innerHTML), 'M3 默认选余额表（明细 ' + detailCount + ' 行，余额 ' + balanceCount + ' 行）');
+    ok(el('statBox').innerHTML.includes('>' + balanceTotal + '<'), 'M3 默认显示余额表的函证金额 ' + balanceTotal);
+  }
+  el('sheetSel').value = '逐笔明细';
+  fire('sheetSel', 'change');
+  ok(/ · 逐笔明细$/.test(el('fileInfo').textContent) && !el('genControl').disabled, 'M3 可手动切换仍可用的明细表');
 
   console.log('\n[空名称的余额对不上累计要阻止导出]');
   await loadFile([['单位名称', '期末余额'], ['华远', 1000], ['东方', 500], [null, 1000]], '待核对');

@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.3.2';
+  var VERSION = '0.3.3';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,16 +81,21 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
-  /** 首列可写独立合计标签；有明细的行在其余列只看专用标签列。 */
-  function isTotalRow(row, labelCols, hasDetails) {
-    for (var i = 0; i < labelCols.length; i++) {
-      if (labelCols[i] < 0) continue;
-      var s = str(row[labelCols[i]]);
-      if (s && isTotalName(s)) return true;
-    }
+  /** 首列有独立合计标签和单位名称时，核对已读明细的金额。 */
+  function isTotalRow(row, header, rawName, cents, runSum, runRows) {
     var standalone = /^(本页|本表|以上)?(合计|小计|总计|共计)$/;
     var first = str(row[0]).replace(/计\s*[（(][^（）()]*[）)]\s*$/, '计');
-    if (standalone.test(norm(first))) return true;
+    var firstIsTotal = standalone.test(norm(first));
+    if (firstIsTotal && (!rawName || (runRows > 0 && cents !== null && Math.abs(cents - runSum) <= 100))) return true;
+
+    var labelCols = header.labelCols || [header.nameCol, header.subjectCol, header.codeCol, header.dirCol];
+    for (var i = 0; i < labelCols.length; i++) {
+      var col = labelCols[i];
+      if (col < 0 || (col === 0 && firstIsTotal && header.nameCol !== 0)) continue;
+      var s = str(row[col]);
+      if (s && isTotalName(s)) return true;
+    }
+    var hasDetails = rawName || str(row[header.subjectCol]).trim() || str(row[header.codeCol]).trim();
     return !hasDetails && row.some(function (cell, col) {
       return col > 0 && standalone.test(norm(str(cell).replace(/[（(][^）)]*[）)]/g, '')));
     });
@@ -411,19 +416,45 @@
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
     var isPeriod = picked && picked.kind === 'flow';
+    var header = {
+      rowIndex: best.rowIndex, span: span,
+      nameCol: nameCol, amountCol: amountCol,
+      subjectCol: subjectCol, codeCol: codeCol, labelCols: labelCols,
+      debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
+      creditOnly: creditCol >= 0 && debitCol < 0,
+      period: picked ? picked.period : '',
+      hasFlowColumns: cols.flow.length > 0,
+      unitScale: 1,
+      problems: problems
+    };
+    var pickedHead = picked && picked.amountCol >= 0
+      ? norm(heads[picked.amountCol]) : '';
+    // 台账：余额列可能是「余额（元）」「本币余额」「累计余额」——先剥掉币种和修饰再判断
+    var ledgerHead = pickedHead
+      .replace(/[（(][^）)]*[）)]/g, '')
+      .replace(/人民币|本位币|本币|累计|元$/g, '');
     // 裸「余额」加交易列时，同一户多行才按逐笔累计余额处理。
+    var ledgerBalance = /^(余额|结余)$/.test(ledgerHead) && header.hasFlowColumns;
     var dupNames = false, conflictingCodes = false;
-    (function () {
+    if (ledgerBalance || partyCodeCol !== undefined) {
       var seen = Object.create(null);
+      var namePrefixes = new Set();
       var lastName = '';
-      var start = best.rowIndex + (best.span === 2 ? 2 : 1);
+      var runSum = 0, runRows = 0;
+      var start = best.rowIndex + span;
       for (var dr = start; dr < rows.length; dr++) {
         var row = rows[dr] || [];
-        var dn = norm(row[nameCol]);
-        if (isTotalRow(row, labelCols, dn || str(row[subjectCol]).trim() || str(row[codeCol]).trim())) continue;
+        var rawName = str(row[nameCol]).trim();
+        var dn = norm(rawName);
+        var cents = readRowAmount(row, header).cents;
+        if (isTotalRow(row, header, rawName, cents, runSum, runRows)) continue;
+        if (cents !== null && (dn || lastName)) {
+          runSum += cents;
+          runRows++;
+        }
         if (!dn) {
           // 余额明细的空名称会沿用上一户。空行和只有备注的行不算一笔。
-          if (lastName && amountCol >= 0 && toCents(row[amountCol]) !== null) dupNames = true;
+          if (lastName && cents !== null) dupNames = true;
           continue;
         }
         lastName = dn;
@@ -433,16 +464,20 @@
           if (code && seen[dn] && seen[dn] !== code) conflictingCodes = true;
         }
         if (code || seen[dn] === undefined) seen[dn] = code;
+        if (ledgerBalance && !dupNames) {
+          // 「华远-北京」或「华远（北京）」和「华远」同时出现才算同户线索。
+          var boundary = /[-－—–（(](?=\s*[^-－—–（）()\s])/g;
+          var suffix;
+          while ((suffix = boundary.exec(rawName))) {
+            if (suffix.index > 0) namePrefixes.add(norm(rawName.slice(0, suffix.index)));
+          }
+        }
       }
-    }());
-
-    var pickedHead = picked && picked.amountCol >= 0
-      ? norm(heads[picked.amountCol]) : '';
-    // 台账：余额列可能是「余额（元）」「本币余额」「累计余额」——先剥掉币种和修饰再判断
-    var ledgerHead = pickedHead
-      .replace(/[（(][^）)]*[）)]/g, '')
-      .replace(/人民币|本位币|本币|累计|元$/g, '');
-    var isLedger = /^(余额|结余)$/.test(ledgerHead) && cols.flow.length > 0 && dupNames;
+      if (ledgerBalance && !dupNames) {
+        dupNames = Array.from(namePrefixes).some(function (prefix) { return seen[prefix] !== undefined; });
+      }
+    }
+    var isLedger = ledgerBalance && dupNames;
 
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
@@ -468,26 +503,50 @@
       problems.push('同时有借贷列和方向列，已按借贷两列算净额，方向列不再重复取反');
     }
 
-    var usable = nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) &&
+    header.usable = nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) &&
       !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide && !isLedger && !conflictingCodes;
 
-    var kind = '';
-    if (debitCol >= 0 || creditCol >= 0) kind = '余额';
-    else if (amountCol >= 0) kind = picked && picked.kind === 'flow' ? '发生额' : '余额';
-
-    return {
-      rowIndex: best.rowIndex, span: span,
-      nameCol: nameCol, amountCol: amountCol,
-      subjectCol: subjectCol, codeCol: codeCol, labelCols: labelCols,
-      debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
-      creditOnly: creditCol >= 0 && debitCol < 0,
-      period: picked ? picked.period : '',
-      usable: usable,
-      amountKind: kind,
-      unitScale: 1,
-      problems: problems
-    };
+    header.amountKind = '';
+    if (debitCol >= 0 || creditCol >= 0) header.amountKind = '余额';
+    else if (amountCol >= 0) header.amountKind = picked && picked.kind === 'flow' ? '发生额' : '余额';
+    return header;
   }
+
+  function readRowAmount(row, header) {
+    var useDebitCredit = header.debitCol >= 0 && header.creditCol >= 0;
+    var cents = null, raw = '', how = '', unreadable = '';
+
+    if (useDebitCredit) {
+      var dRaw = row[header.debitCol], cRaw = row[header.creditCol];
+      var d = toCents(dRaw), cr = toCents(cRaw);
+      var hasDebit = str(dRaw).trim() !== '', hasCredit = str(cRaw).trim() !== '';
+      // 一格有内容却读不出（「待核实」「#REF!」）不能当 0
+      if (hasDebit && d === null) unreadable = '借方';
+      else if (hasCredit && cr === null) unreadable = '贷方';
+      if (!unreadable && (d !== null || cr !== null)) cents = (d || 0) - (cr || 0);
+      if (hasDebit || hasCredit) raw = str(dRaw) + '/' + str(cRaw);
+      how = '借−贷';
+    } else if (header.creditOnly) {
+      raw = row[header.creditCol];
+      cents = toCents(raw);
+      // 只有「贷方余额」一列时，贷方余额是负数
+      if (cents !== null) cents = -cents;
+      how = '贷方余额';
+    } else {
+      raw = row[header.amountCol];
+      cents = toCents(raw);
+    }
+
+    if (cents !== null && header.unitScale > 1) cents *= header.unitScale;
+    // 方向列：写「贷」的当负数。借贷两列本身带符号，再取反会翻两次。
+    if (cents !== null && header.dirCol >= 0 && !useDebitCredit && !header.creditOnly) {
+      var dir = norm(row[header.dirCol]);
+      if (/^贷/.test(dir) && cents > 0) cents = -cents;
+      else if (/^借/.test(dir) && cents < 0) cents = -cents;
+    }
+    return { cents: cents, raw: raw, how: how, unreadable: unreadable };
+  }
+
   function parseRows(rows, header, opts) {
     opts = opts || {};
     var firstExcelRow = opts.firstExcelRow || 1;
@@ -525,8 +584,6 @@
     var runRows = 0;   // 累计了几行
     var ambiguous = [];  // 分不清是合计行还是续行的行号
     var unmatchedNames = [];  // 无法归到上一户的行号
-    var labelCols = header.labelCols || [header.nameCol, header.subjectCol, header.codeCol, header.dirCol];
-
     for (var r = dataStart; r < rows.length; r++) {
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
@@ -539,56 +596,21 @@
         rawSubject = subject;
       }
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
-      if (isTotalRow(row, labelCols, rawName || rawSubject || code)) {
-        skipped.push({ srcRow: excelRow, reason: '合计行', name: name });
+      var amount = readRowAmount(row, header);
+      var cents = amount.cents, rawAmount = amount.raw;
+      if (isTotalRow(row, header, rawName, cents, runSum, runRows)) {
+        skipped.push({ srcRow: excelRow, reason: '合计行', name: name, cents: cents, raw: rawAmount });
         continue;
       }
       if (rawName) lastName = rawName;
 
-      var cents = null, rawAmount = '', how = '', unreadable = '';
-
-      if (useDebitCredit) {
-        var dRaw = row[header.debitCol], cRaw = row[header.creditCol];
-        var d = toCents(dRaw), cr = toCents(cRaw);
-        // 一格有内容却读不出（「待核实」「#REF!」）不能当 0
-        if (str(dRaw).trim() !== '' && d === null) unreadable = '借方';
-        else if (str(cRaw).trim() !== '' && cr === null) unreadable = '贷方';
-        if (unreadable) cents = null;
-        else if (d === null && cr === null) cents = null;
-        else cents = (d || 0) - (cr || 0);
-        rawAmount = str(dRaw) + '/' + str(cRaw);
-        how = '借−贷';
-      } else if (creditOnly) {
-        rawAmount = row[header.creditCol];
-        cents = toCents(rawAmount);
-        // 只有「贷方余额」一列时，贷方余额是负数
-        if (cents !== null) cents = -cents;
-        how = '贷方余额';
-      } else {
-        rawAmount = row[header.amountCol];
-        cents = toCents(rawAmount);
-      }
-
-      if (unreadable) {
-        skipped.push({ srcRow: excelRow, reason: '金额读不出', name: name || '', raw: unreadable + '列：' + rawAmount });
+      if (amount.unreadable) {
+        skipped.push({ srcRow: excelRow, reason: '金额读不出', name: name || '', raw: amount.unreadable + '列：' + rawAmount });
         continue;
-      }
-      if (cents !== null && header.unitScale > 1) cents = cents * header.unitScale;
-
-      // 方向列：写「贷」的当负数。借贷两列本身带符号，再取反会翻两次。
-      if (cents !== null && header.dirCol >= 0 && !useDebitCredit && !creditOnly) {
-        var dir = norm(row[header.dirCol]);
-        if (/^贷/.test(dir) && cents > 0) cents = -cents;
-        else if (/^借/.test(dir) && cents < 0) cents = -cents;
       }
 
       // 整行都空的才算空行——用原始值判断，不能用沿用后的名称
-      var blank = !rawName && str(rawAmount).trim() === '' && !rawSubject && !code;
-      if (useDebitCredit && !rawName && !rawSubject && !code &&
-        str(row[header.debitCol]).trim() === '' && str(row[header.creditCol]).trim() === '') {
-        blank = true;
-      }
-      if (blank) continue;
+      if (!rawName && str(rawAmount).trim() === '' && !rawSubject && !code) continue;
 
       // 同额或有几分尾差，都不足以证明没有标签的行是合计。
       if (!rawName && !rawSubject && !mergedNames[r] && cents !== null && cents !== 0) {
@@ -618,7 +640,7 @@
       runRows++;
       entities.push({
         name: name, subject: subject, code: code,
-        cents: cents, srcRow: excelRow, how: how
+        cents: cents, srcRow: excelRow, how: amount.how
       });
     }
 
@@ -639,10 +661,18 @@
     if (skipped.length) {
       var noName = skipped.filter(function (s) { return s.reason === '没有单位名称'; }).length;
       var badAmt = skipped.filter(function (s) { return s.reason === '金额读不出'; }).length;
-      var totals = skipped.filter(function (s) { return s.reason === '合计行'; }).length;
+      var totals = skipped.filter(function (s) { return s.reason === '合计行'; });
       if (noName) problems.push(noName + ' 行有金额但没有单位名称，没有计入（请回原表核对）');
       if (badAmt) problems.push(badAmt + ' 行的金额读不出，没有计入');
-      if (totals) problems.push('跳过 ' + totals + ' 行合计行');
+      if (totals.length) {
+        var detail = totals.map(function (s) {
+          var raw = str(s.raw).trim();
+          var amountText = s.cents !== null ? moneyText(s.cents) + ' 元'
+            : (raw ? '金额读不出：' + raw : '金额空白');
+          return '第 ' + s.srcRow + ' 行 ' + amountText;
+        });
+        problems.push('跳过 ' + totals.length + ' 行合计行（' + detail.join('、') + '）');
+      }
     }
     return { entities: entities, skipped: skipped, problems: problems, ambiguous: ambiguous };
   }

@@ -786,7 +786,8 @@ async function workbookRegressions() {
   eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000], ['东方', '未填科目', 500]]),
     'F4 序号列和名称列的真实合计行都跳过');
   ok(control && XLSX.utils.sheet_to_json(control.Sheets[control.SheetNames[0]], { header: 1 })
-    .some(row => row.includes('跳过 2 行合计行')), 'F4 控制表记录跳过的合计行总数');
+    .some(row => row.includes('跳过 2 行合计行（第 4 行 1,500.00 元、第 5 行 1,500.00 元）')),
+    'F4/M1 控制表记录跳过的合计行总数、行号和金额');
 
   const missingRows = XLSX.utils.sheet_to_json(wb.Sheets['缺少名称'], { header: 1, defval: null });
   const missingHeader = Core.detectHeader(missingRows);
@@ -844,6 +845,32 @@ async function workbookRegressions() {
   await loadWorkbook([['期末余额', [[...voucherHeader.slice(0, -1), '期末余额'], ...voucherRows, repeated]]]);
   eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1300], ['东方', '未填科目', 500]]),
     '明确的期末余额仍可按同一户的多行相加');
+
+  console.log('\n[第十五轮 M1/M2/M3 XLSX 反例]');
+  await loadWorkbook([['首列备注', [['备注', '客户名称', '期末余额'],
+    ['收款', '华远', 1000], ['合计', '东方', 500000]]]]);
+  eq(exportedBalances(), JSON.stringify([['东方', '未填科目', 500000], ['华远', '未填科目', 1000]]),
+    'M1 首列写合计但有单位名称且金额不符时，东方 500,000 元进入控制表');
+
+  await loadWorkbook([['首列小计', [['业务员', '客户名称', '期末余额'],
+    ['张三', '华远', 1000], ['张三', '华远', 500], ['小计', '华远', 1501], ['小计', '东方', 1501.01]]]]);
+  eq(exportedBalances(), JSON.stringify([['东方', '未填科目', 1501.01], ['华远', '未填科目', 1500]]),
+    'M1/N1 小计允许 1 元尾差，超过 1 元的有名行保留');
+
+  const posting = ['2026-06-12', '记-003', '收货款', 1300];
+  for (const name of ['华远-北京', '华远（北京）']) {
+    await loadWorkbook([['逐笔台账', [voucherHeader, voucherRows[0], [name, ...posting], voucherRows[1]]]]);
+    eq(exportedBalances(), '', 'M2 「华远」和「' + name + '」的逐笔累计余额不能导出控制表');
+  }
+  await loadWorkbook([['往来余额', [voucherHeader, ...voucherRows, ['华远建设', ...posting]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远建设', '未填科目', 1300], ['华远', '未填科目', 1000], ['东方', '未填科目', 500]]),
+    'M2/N2 不因单位名称共享普通前缀而拒收每户一行的余额表');
+
+  await loadWorkbook([['逐笔明细', [voucherHeader, ...Array.from({ length: 40 }, (_, i) =>
+    ['客户' + i, '2026-06-08', '记-' + i, '收货款', 1000 + i])]],
+  ['余额表', [['单位名称', '期末余额'], ['华远', 1000000], ['东方', 500000]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000000], ['东方', '未填科目', 500000]]),
+    'M3 默认导出的控制表采用余额表的两户和金额');
 }
 
 workbookRegressions().then(function () {
