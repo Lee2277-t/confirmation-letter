@@ -287,6 +287,46 @@ eq(f7h.span, 2, '认出两级表头');
 const f7 = Core.parseRows(f7rows, f7h, {});
 eq(f7.entities.filter(e => e.name === '甲')[0].cents, -30000, '甲 = −300（期末贷方）');
 eq(f7.entities.filter(e => e.name === '乙')[0].cents, 40000, '乙 = 400（期末借方）');
+
+console.log('\n[第五轮 1 只写「金额」的列不能被当成发生额]');
+[['单位名称', '期末金额'], ['单位名称', '金额'], ['客户名称', '应收金额'],
+ ['客户名称', '金额（元）'], ['客户名称', '期末金额（元）']].forEach(function (h) {
+  const hh = Core.detectHeader([h, [h[0] === '单位名称' ? '甲' : '华远', 1286400.5]]);
+  eq(hh.usable, true, '「' + h[1] + '」应该能用');
+  eq(hh.amountKind, '余额', '「' + h[1] + '」是余额不是发生额');
+});
+
+console.log('\n[第五轮 2 两级表头的发生额不能被当余额]');
+const f2h = Core.detectHeader([
+  ['客户名称', '本期发生额', ''],
+  ['', '借方', '贷方'],
+  ['甲', 1000, 200]
+]);
+eq(f2h.usable, false, '两级表头里是发生额 → 不能发函');
+
+console.log('\n[第五轮 3 没有借贷列的流水账也要拒]');
+const f3rows = [
+  ['日期', '客户名称', '摘要', '金额', '余额'],
+  ['2026-01-05', '华远', '收款', 1000, 1000],
+  ['2026-02-05', '华远', '收款', 500, 1500]
+];
+const f3 = Core.detectHeader(f3rows);
+eq(f3.usable, false, '逐笔余额相加会翻倍，必须拒');
+ok(f3.problems.some(p => /流水账/.test(p)), '说明是流水账');
+
+console.log('\n[第五轮 4 带「业务员」列的余额表不能误拒]');
+const f5salesRows = [
+  ['客户名称', '期初余额', '本期借方', '本期贷方', '期末余额', '业务员'],
+  ['甲', 100, 300, 0, 400, '张三']
+];
+const f5salesH = Core.detectHeader(f5salesRows);
+eq(f5salesH.usable, true, '业务员是人员列，不是流水标志');
+const f5salesP = Core.parseRows(f5salesRows, f5salesH, {});
+eq(f5salesP.entities[0].cents, 40000, '取期末 400');
+
+console.log('\n[第五轮 附：裸「名称」当科目表]');
+eq(Core.detectHeader([['名称', '期末余额'], ['银行存款', 100]]).usable, false, '「名称」单独出现不当往来表');
+eq(Core.detectHeader([['单位名称', '期末余额'], ['甲', 100]]).usable, true, '「单位名称」照常');
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

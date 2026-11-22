@@ -105,7 +105,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\pack.ps1
 | 套件 | 断言 | 覆盖 |
 |---|---|---|
 | core | 83 | 金额解析、认表头、读行、同名合并、四种选样口径、控制表、询证函、文件名 |
-| fixes | 104 | 第一轮审查的 6 条阻塞 + 4 条重要问题，每条一个反例 |
+| fixes | 121 | 第一轮审查的 6 条阻塞 + 4 条重要问题，每条一个反例 |
 | limits | 33 | 空表、无表头、脏数据、超长名称、表头在很下面、列序打乱、空结果 |
 | export | 41 | 装进 xlsx 再读回来核对、留空列不能有假数据、编号连续、HTML 完整 |
 | ui-smoke | 49 | 假 DOM 跑真 app.js：读文件 → 改口径 → 生成两种文件 |
@@ -130,7 +130,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\pack.ps1
 
 ## 版本
 
-v0.1.4
+v0.1.5
 
 ## 许可
 

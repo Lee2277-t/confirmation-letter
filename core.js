@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.4';
+  var VERSION = '0.1.5';
 
   /* ---------------- 基础 ---------------- */
 
@@ -112,7 +112,8 @@
   var OPEN_WORDS = /期初|年初|上期|上月|上年年末/;  // 期初口径
   var CLOSE_WORDS = /期末|年末|本期期末/;          // 期末口径
   var PERIOD_WORDS = /本期|本年|累计/;             // 期间发生额
-  var FLOW_WORDS = /日期|凭证|摘要|业务|单号|票号/; // 流水账特征
+  // 只认真正标识「一笔交易」的列；「业务员」「业务类型」是人员/属性列，不是流水标志
+  var FLOW_WORDS = /日期|凭证|摘要|单号|票号/;
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
   /**
@@ -142,8 +143,11 @@
     }
     if (isAmount) {
       // 「发生额」「本期」是流量，不是余额
-      var kind = (period === 'period' || /发生额/.test(t) ||
-        (/金额/.test(t) && !/余额/.test(t))) ? 'flow' : 'balance';
+      // 判断依据只有三条：写着「发生额」=流水；写着「余额/期初/期末」=余额；
+      // 带借贷方向又没有期间词的「金额」=流水（那是分录的两栏）
+      var isBalanceWord = /余额/.test(t) || OPEN_WORDS.test(t) || CLOSE_WORDS.test(t);
+      var kind = /发生额/.test(t) ? 'flow'
+        : (isBalanceWord ? 'balance' : (side ? 'flow' : 'balance'));
       return { role: 'amount', side: side, period: period, kind: kind };
     }
     if (NAME_WEAK.test(t)) return { role: 'name', rank: 2 };
@@ -223,7 +227,8 @@
         }
         return;
       }
-      cols.amount.push({ c: c, side: side, period: groups[c] || '', kind: 'balance' });
+      var g = groups[c] || '';
+      cols.amount.push({ c: c, side: side, period: g, kind: g === 'period' ? 'flow' : 'balance' });
     });
     var score = 0;
     // 必须真的分了组：下一行至少两列带借贷方向
@@ -304,16 +309,16 @@
     var creditCol = picked && !flowOnly ? picked.creditCol : -1;
 
     // 流水账：有日期/凭证/摘要，且金额是「借/贷」两列 —— 每行是一笔交易，不是每个单位的余额
-    var hasSidedCols = cols.amount.some(function (a) { return !!a.side; });
-    // 有日期/凭证/摘要，又有借方、贷方这类列 —— 就是流水账
-    var isFlow = cols.flow.length > 0 && hasSidedCols;
+    // 有日期/凭证/摘要，又有金额列 —— 就是流水账。
+    // 没借贷列也要拦：那种表的「余额」是逐笔累计余额，按单位相加会翻倍
+    var isFlow = cols.flow.length > 0 && cols.amount.length > 0;
     // 只有期初余额：函证要的是截止日余额，期初会误导
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
-    var isPeriod = picked && picked.period === 'period';
+    var isPeriod = picked && picked.kind === 'flow';
     var isSubjectTable = !nameIsCounterparty &&
-      (/科目名称|项目名称|^科目$/.test(nameHead) ||
-        (cols.code.length && /科目|项目/.test(norm((rows[best.rowIndex] || [])[cols.code[0]])) && nameHead === '名称'));
+      (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
+        (cols.code.length && /科目|项目/.test(norm((rows[best.rowIndex] || [])[cols.code[0]]))));
 
     if (debitCol >= 0 && creditCol >= 0) problems.push('检测到借方、贷方两列，按 借−贷 合成净额');
     if (span === 2) problems.push('两级表头：期间取自上一行，借贷取自下一行');
@@ -336,7 +341,8 @@
     return {
       rowIndex: best.rowIndex, span: span,
       nameCol: nameCol, amountCol: amountCol,
-      subjectCol: cols.subject.length ? cols.subject[0] : -1,
+      subjectCol: cols.subject.length ? cols.subject[0]
+        : (/科目名称|^科目$/.test(nameHead) ? nameCol : -1),
       codeCol: cols.code.length ? cols.code[0] : -1,
       debitCol: debitCol, creditCol: creditCol,
       dirCol: cols.dir.length ? cols.dir[0] : -1,
