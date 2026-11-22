@@ -327,6 +327,41 @@ eq(f5salesP.entities[0].cents, 40000, '取期末 400');
 console.log('\n[第五轮 附：裸「名称」当科目表]');
 eq(Core.detectHeader([['名称', '期末余额'], ['银行存款', 100]]).usable, false, '「名称」单独出现不当往来表');
 eq(Core.detectHeader([['单位名称', '期末余额'], ['甲', 100]]).usable, true, '「单位名称」照常');
+
+console.log('\n[第六轮 1 期间类金额列是流水，不是余额]');
+const s1 = Core.detectHeader([['客户名称', '本期增加', '本期减少'], ['华远', 1000, 200]]);
+eq(s1.usable, false, '本期增加/减少不是余额');
+
+console.log('\n[第六轮 2 「余额」列不能被左边的金额列顶掉]');
+const s2a = Core.parseRows([['客户名称', '本月金额', '余额'], ['华远', 500, 1500]],
+  Core.detectHeader([['客户名称', '本月金额', '余额'], ['华远', 500, 1500]]), {});
+eq(s2a.entities[0].cents, 150000, '取余额 1,500，不取本月金额 500');
+const s2b = Core.parseRows([['客户名称', '开票金额', '已收金额', '余额'], ['华远', 1800, 1000, 800]],
+  Core.detectHeader([['客户名称', '开票金额', '已收金额', '余额'], ['华远', 1800, 1000, 800]]), {});
+eq(s2b.entities[0].cents, 80000, '取余额 800');
+
+console.log('\n[第六轮 3 带日期列的正常余额表不能拒]');
+const s3 = Core.detectHeader([['客户名称', '最后交易日期', '期末余额'], ['华远', '2026-05-20', 1286400.5]]);
+eq(s3.usable, true, '一行一户 + 日期列不是流水账');
+const s3b = Core.detectHeader([['日期', '客户名称', '摘要', '金额', '余额'], ['2026-01-05', '华远', '收款', 1000, 1000]]);
+eq(s3b.usable, false, '日期 + 金额 + 余额 才是流水账');
+
+console.log('\n[第六轮 4 科目名称列要进控制表的科目]');
+const r6rows = [['客户名称', '科目名称', '期末余额'], ['华远', '应收账款', 1000]];
+const r6h = Core.detectHeader(r6rows);
+eq(r6h.subjectCol, 1, '科目名称列被认成科目列');
+const r6p = Core.parseRows(r6rows, r6h, {});
+eq(r6p.entities[0].subject, '应收账款', '科目带出来了');
+
+console.log('\n[第六轮 5 两个方向列取期末那个]');
+const s5rows = [['客户名称', '期初方向', '期初余额', '期末方向', '期末余额'], ['华远', '借', 0, '贷', 1000]];
+const s5 = Core.parseRows(s5rows, Core.detectHeader(s5rows), {});
+eq(s5.entities[0].cents, -100000, '按期末方向（贷）取负数');
+
+console.log('\n[第六轮 6 标题写「单位：万元」要换算]');
+const s6rows = [['往来余额表（单位：万元）'], ['单位名称', '期末余额'], ['华远', 128.64]];
+const s6 = Core.parseRows(s6rows, Core.detectHeader(s6rows), {});
+eq(s6.entities[0].cents, 128640000, '128.64 万元 = 1,286,400.00 元');
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

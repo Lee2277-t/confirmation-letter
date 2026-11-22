@@ -317,6 +317,28 @@ async function loadFile(rows, sheetName) {
   console.log('\n[裸「单位」表头能读]');
   await loadFile([['单位', '期末余额'], ['华远科技有限公司', 1000000]], '往来');
   eq(el('genControl').disabled, false, '「单位」这种表头也能用');
+
+  console.log('\n[合并单元格：客户名只在首行时不能丢钱]');
+  {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['单位名称', '科目', '期末余额'],
+      ['华远科技有限公司', '应收账款', 1000000],
+      ['', '预收账款', -300000],
+      ['', '其他应收款', 200000],
+      ['东方建设', '应收账款', 500000]
+    ]);
+    ws['!merges'] = [{ s: { r: 1, c: 0 }, e: { r: 3, c: 0 } }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '往来');
+    payload = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+    const f = el('file');
+    f.files = [{ name: '合并.xlsx' }];
+    fire('file', 'change');
+    await sleep(150);
+    const list = el('listBox').innerHTML;
+    ok(/900,000\.00/.test(list), '华远 = 1,000,000 − 300,000 + 200,000 = 900,000（实际：' + list.replace(/<[^>]+>/g, ' ').slice(0, 100) + '）');
+    ok(/预收账款/.test(list), '合并区下面的科目也带出来了');
+  }
   console.log('\n' + '='.repeat(56));
   if (fail.length) {
     console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

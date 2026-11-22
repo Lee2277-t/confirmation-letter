@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.5';
+  var VERSION = '0.1.6';
 
   /* ---------------- 基础 ---------------- */
 
@@ -147,8 +147,9 @@
       // 带借贷方向又没有期间词的「金额」=流水（那是分录的两栏）
       var isBalanceWord = /余额/.test(t) || OPEN_WORDS.test(t) || CLOSE_WORDS.test(t);
       var kind = /发生额/.test(t) ? 'flow'
-        : (isBalanceWord ? 'balance' : (side ? 'flow' : 'balance'));
-      return { role: 'amount', side: side, period: period, kind: kind };
+        : (isBalanceWord ? 'balance'
+          : ((period === 'period' || side) ? 'flow' : 'balance'));
+      return { role: 'amount', side: side, period: period, kind: kind, balWord: /余额/.test(t) };
     }
     if (NAME_WEAK.test(t)) return { role: 'name', rank: 2 };
     return { role: 'other' };
@@ -160,8 +161,13 @@
     (row || []).forEach(function (cell, c) {
       var r = roleOf(cell);
       if (!r) return;
-      if (r.role === 'name') cols.name.push({ c: c, rank: r.rank });
-      else if (r.role === 'amount') cols.amount.push({ c: c, side: r.side, period: r.period, kind: r.kind });
+      if (r.role === 'name') {
+        cols.name.push({ c: c, rank: r.rank });
+        if (r.subject) cols.subject.push(c);
+      }
+      else if (r.role === 'amount') {
+        cols.amount.push({ c: c, side: r.side, period: r.period, kind: r.kind, balWord: r.balWord });
+      }
       else if (r.role === 'subject') cols.subject.push(c);
       else if (r.role === 'code') cols.code.push(c);
       else if (r.role === 'dir') cols.dir.push(c);
@@ -250,7 +256,9 @@
     };
     var best = null;
     cols.forEach(function (a) {
-      var r = rankOf(a.period) * 10 + (a.kind === 'balance' ? 5 : 0);
+      // 写着「余额」的列优先：
+      // 「开票金额 1,800 / 已收 1,000 / 余额 800」不能因为余额排在第 3 列就选中 1,800
+      var r = rankOf(a.period) * 10 + (a.kind === 'balance' ? 5 : 0) + (a.balWord ? 3 : 0);
       if (!best || r > best.r) best = { r: r, a: a };
     });
     if (!best) return null;
@@ -258,15 +266,13 @@
     // 同一期间里，借贷两列配对成净额；只有一列就按单边处理
     var D = cols.filter(function (a) { return a.period === period && a.side === 'D'; })[0];
     var C = cols.filter(function (a) { return a.period === period && a.side === 'C'; })[0];
-    var plain = cols.filter(function (a) { return a.period === period && !a.side && a.kind === 'balance'; })[0];
     if (D && C) return { debitCol: D.c, creditCol: C.c, amountCol: -1, period: period };
     if (D) return { debitCol: -1, creditCol: -1, amountCol: D.c, period: period, positive: true };
     if (C) return { debitCol: -1, creditCol: C.c, amountCol: -1, period: period };
-    if (plain) return { debitCol: -1, creditCol: -1, amountCol: plain.c, period: period };
-    var any = cols.filter(function (a) { return a.period === period; })[0];
-    return { debitCol: -1, creditCol: -1, amountCol: any.c, period: period, kind: any.kind };
+    // 没有借贷列就用刚刚评出来的那一列——不能回头取「第一列」，
+    // 否则「开票金额 / 已收金额 / 余额」会选中开票金额
+    return { debitCol: -1, creditCol: -1, amountCol: best.a.c, period: period, kind: best.a.kind };
   }
-
   /**
    * 找表头。返回各列位置 + usable（能不能用来发函）+ problems（提示，不影响 usable）。
    */
@@ -295,6 +301,18 @@
     var problems = [];
     var span = best.span;
 
+    // 表头上方的标题可能写着「单位：万元」，整表的数都要放大
+    var unitScale = 1, unitWord = '';
+    for (var ur = 0; ur <= best.rowIndex; ur++) {
+      ((rows[ur] || [])).forEach(function (cell) {
+        var s = str(cell);
+        if (!s) return;
+        if (/万\s*元/.test(s)) { unitScale = 10000; unitWord = '万元'; }
+        else if (/千\s*元/.test(s)) { unitScale = 1000; unitWord = '千元'; }
+      });
+    }
+    if (unitScale > 1) problems.push('表的金额单位是「' + unitWord + '」，已统一换算成元');
+
     // 名称列：客户/单位优先，其次泛称，最后才是科目名称
     var nameCol = cols.name.slice().sort(function (x, y) {
       return y.rank - x.rank || x.c - y.c;
@@ -309,9 +327,11 @@
     var creditCol = picked && !flowOnly ? picked.creditCol : -1;
 
     // 流水账：有日期/凭证/摘要，且金额是「借/贷」两列 —— 每行是一笔交易，不是每个单位的余额
-    // 有日期/凭证/摘要，又有金额列 —— 就是流水账。
-    // 没借贷列也要拦：那种表的「余额」是逐笔累计余额，按单位相加会翻倍
-    var isFlow = cols.flow.length > 0 && cols.amount.length > 0;
+    // 流水账：有日期/凭证/摘要，且要么有多列金额（金额 + 余额 = 逐笔累计），
+    // 要么金额列本身带借贷/发生额。
+    // 只有「日期 + 期末余额」的一行一户表不是流水——那是带最后交易日的余额表。
+    var sidedOrFlowAmt = cols.amount.some(function (a) { return !!a.side || a.kind === 'flow'; });
+    var isFlow = cols.flow.length > 0 && (cols.amount.length >= 2 || sidedOrFlowAmt);
     // 只有期初余额：函证要的是截止日余额，期初会误导
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
@@ -345,11 +365,19 @@
         : (/科目名称|^科目$/.test(nameHead) ? nameCol : -1),
       codeCol: cols.code.length ? cols.code[0] : -1,
       debitCol: debitCol, creditCol: creditCol,
-      dirCol: cols.dir.length ? cols.dir[0] : -1,
+      dirCol: (function () {
+        if (!cols.dir.length) return -1;
+        // 「期初方向 / 期末方向」两列时，取期末那个
+        var hit = cols.dir.filter(function (c) {
+          return /期末|年末/.test(norm((rows[best.rowIndex] || [])[c]));
+        })[0];
+        return hit !== undefined ? hit : cols.dir[0];
+      }()),
       creditOnly: creditCol >= 0 && debitCol < 0,
       period: picked ? picked.period : '',
       usable: usable,
       amountKind: kind,
+      unitScale: unitScale,
       problems: problems
     };
   }
@@ -404,6 +432,7 @@
         skipped.push({ srcRow: excelRow, reason: '金额读不出', name: name || '', raw: unreadable + '列：' + rawAmount });
         continue;
       }
+      if (cents !== null && header.unitScale > 1) cents = cents * header.unitScale;
 
       // 方向列：写「贷」的当负数。借贷两列本身带符号，再取反会翻两次。
       if (cents !== null && header.dirCol >= 0 && !useDebitCredit && !creditOnly) {

@@ -34,6 +34,24 @@
   function sheetRows(wb, name) {
     var ws = wb.Sheets[name];
     if (!ws) return [];
+    // 合并单元格：Excel 只把值放在左上角，其余格子是空。
+    // 客户名按单位合并（一家占好几行科目）时，下面几行会被当成「没有单位名称」丢掉。
+    if (ws['!merges'] && XLSX.utils.encode_cell) {
+      ws['!merges'].forEach(function (m) {
+        var src = ws[XLSX.utils.encode_cell({ r: m.s.r, c: m.s.c })];
+        if (!src || src.v === undefined || src.v === null) return;
+        for (var rr = m.s.r; rr <= m.e.r; rr++) {
+          for (var cc = m.s.c; cc <= m.e.c; cc++) {
+            if (rr === m.s.r && cc === m.s.c) continue;
+            var addr = XLSX.utils.encode_cell({ r: rr, c: cc });
+            var cur = ws[addr];
+            if (!cur || cur.v === undefined || cur.v === null || cur.v === '') {
+              ws[addr] = { t: src.t, v: src.v };
+            }
+          }
+        }
+      });
+    }
     // 错误值（#REF!）在 raw 模式下是 null，和空格子分不清，先换成文字
     Object.keys(ws).forEach(function (addr) {
       if (addr.charAt(0) === '!') return;
