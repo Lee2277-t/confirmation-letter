@@ -349,15 +349,29 @@ async function loadFile(rows, sheetName, merge) {
   ok(/逐笔明细台账/.test(el('fileInfo').textContent), 'F3 显示逐笔余额不能相加的提示');
   ok(el('genControl').disabled && el('genLetter').disabled, 'F3 禁用控制表和询证函');
 
-  console.log('\n[首列备注保留明细，合计行显示跳过数量]');
+  console.log('\n[首列备注保留价税合计明细，跳过首列合计行]');
   await loadFile([['备注', '客户名称', '期末余额'], ['价税合计', '华远', 1000],
-    [null, '东方', 500], [null, '合计', 1500]], '期末余额');
+    ['合计（本币）', null, 1000], [null, '东方', 500], ['本页小计', null, 500],
+    [null, '海岚', 200]], '期末余额');
   const balanceRows = el('listBox').innerHTML.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || [];
   ok(balanceRows.some(row => row.includes('>华远</td>') && row.includes('>1,000.00</td>')) &&
-    balanceRows.some(row => row.includes('>东方</td>') && row.includes('>500.00</td>')),
-    'F4 列表显示华远 1,000 元和东方 500 元');
-  ok(/跳过 1 行合计行/.test(el('statBox').innerHTML), 'F4 在选样统计中显示合计行提示');
-  ok(!el('genControl').disabled && !el('genLetter').disabled, 'F4 两种导出均可用');
+    balanceRows.some(row => row.includes('>东方</td>') && row.includes('>500.00</td>')) &&
+    balanceRows.some(row => row.includes('>海岚</td>') && row.includes('>200.00</td>')),
+    'N1 列表显示华远 1,000 元、东方 500 元和海岚 200 元');
+  ok(/跳过 2 行合计行/.test(el('statBox').innerHTML), 'N1 在选样统计中显示跳过两行合计');
+  ok(!el('genControl').disabled && !el('genLetter').disabled, 'N1 首列备注合计不触发歧义拒收，两种导出均可用');
+
+  console.log('\n[同样的凭证列，每户一行可读，同户多笔提示台账]');
+  const voucherRows = [['客户名称', '日期', '凭证号', '摘要', '余额'],
+    ['华远', '2026-06-08', '记-001', '期初', 1000], ['东方', '2026-06-11', '记-002', '期初', 500]];
+  await loadFile(voucherRows, '往来余额');
+  ok(el('fileInfo').textContent.includes('往来余额') && !el('fileInfo').textContent.includes('逐笔明细台账'),
+    'N2 每户一行时显示导入成功');
+  ok(/函证金额[\s\S]{0,40}>1,500\.00</.test(el('statBox').innerHTML), 'N2 两户函证金额为 1,500 元');
+  ok(!el('genControl').disabled && !el('genLetter').disabled, 'N2 每户一行时两种导出均可用');
+  await loadFile(voucherRows.concat([['华远', '2026-06-12', '记-003', '调整', 1300]]), '待核对');
+  ok(/逐笔明细台账/.test(el('fileInfo').textContent), 'N2 同户多笔时提示逐笔明细台账');
+  ok(el('genControl').disabled && el('genLetter').disabled, 'N2 同户多笔拒收后停用两种导出');
 
   console.log('\n[空名称的余额对不上累计要阻止导出]');
   await loadFile([['单位名称', '期末余额'], ['华远', 1000], ['东方', 500], [null, 1000]], '待核对');

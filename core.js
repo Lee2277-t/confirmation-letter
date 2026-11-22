@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.3.1';
+  var VERSION = '0.3.2';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,15 +81,18 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
-  /** 只有标签列允许带前缀的合计；无明细的行可在其余附属列识别独立合计标签。 */
+  /** 首列可写独立合计标签；有明细的行在其余列只看专用标签列。 */
   function isTotalRow(row, labelCols, hasDetails) {
     for (var i = 0; i < labelCols.length; i++) {
       if (labelCols[i] < 0) continue;
       var s = str(row[labelCols[i]]);
       if (s && isTotalName(s)) return true;
     }
+    var standalone = /^(本页|本表|以上)?(合计|小计|总计|共计)$/;
+    var first = str(row[0]).replace(/计\s*[（(][^（）()]*[）)]\s*$/, '计');
+    if (standalone.test(norm(first))) return true;
     return !hasDetails && row.some(function (cell, col) {
-      return col > 0 && /^(本页|本表|以上)?(合计|小计|总计|共计)$/.test(norm(str(cell).replace(/[（(][^）)]*[）)]/g, '')));
+      return col > 0 && standalone.test(norm(str(cell).replace(/[（(][^）)]*[）)]/g, '')));
     });
   }
 
@@ -408,7 +411,7 @@
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
     var isPeriod = picked && picked.kind === 'flow';
-    // 裸「余额」加交易列时，重名或完整的凭证信息都可能表明是逐笔累计余额。
+    // 裸「余额」加交易列时，同一户多行才按逐笔累计余额处理。
     var dupNames = false, conflictingCodes = false;
     (function () {
       var seen = Object.create(null);
@@ -439,11 +442,7 @@
     var ledgerHead = pickedHead
       .replace(/[（(][^）)]*[）)]/g, '')
       .replace(/人民币|本位币|本币|累计|元$/g, '');
-    var flowHeads = cols.flow.map(function (c) { return norm(heads[c]); });
-    var hasVoucherDetails = flowHeads.some(function (s) { return /日期$/.test(s); }) &&
-      flowHeads.some(function (s) { return /^(凭证(字号|编号|号码|号)|单据(编号|号码|号))$/.test(s); }) &&
-      flowHeads.some(function (s) { return s === '摘要'; });
-    var isLedger = /^(余额|结余)$/.test(ledgerHead) && (hasVoucherDetails || (cols.flow.length > 0 && dupNames));
+    var isLedger = /^(余额|结余)$/.test(ledgerHead) && cols.flow.length > 0 && dupNames;
 
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||

@@ -702,8 +702,8 @@ async function workbookRegressions() {
   await loadWorkbook([['按客户汇总', sameName]]);
   ok(element('genLetter').disabled && /同名|编码/.test(element('fileInfo').textContent), '同名异码应说明对象歧义，避免把两户做成一封函');
   await loadWorkbook([['逐笔台账', [['日期', '凭证号', '客户名称', '摘要', '余额'],
-    ['2026-06-08', '记-018', '远峰科技有限公司', '收到货款', 300], ['2026-06-11', '记-023', '海岚科技有限公司', '收到货款', 200]]]]);
-  ok(element('genLetter').disabled && /台账/.test(element('fileInfo').textContent), '日期、凭证号和摘要齐全的逐笔台账，即使每户一笔也要拒绝');
+    ['2026-06-08', '记-018', '远峰科技有限公司', '收到货款', 300], ['2026-06-11', '记-023', '远峰科技有限公司', '收到货款', 200]]]]);
+  ok(element('genLetter').disabled && /台账/.test(element('fileInfo').textContent), '同一户多笔且只有累计余额的逐笔台账要拒绝');
 
   await loadWorkbook([['期末余额', [['客户名称', '期末方向', '期末余额', '期末贷方余额'], ['远峰科技有限公司', '借', 300, 20]]]]);
   eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '未填科目', 300]]), '完整期末余额优先于同期间的单边贷方');
@@ -796,6 +796,54 @@ async function workbookRegressions() {
     JSON.stringify([['华远', 100000], ['东方', 50000]]), 'F5 无法归属的 1,000 元没有并到东方');
   ok(parsedMissing.problems.some(p => p.includes('第 4 行没有单位名称，金额也与上面的合计对不上')),
     'F5 读取问题包含原表行号和金额不符原因');
+
+  console.log('\n[第十四轮 N1 首列合计和小计 XLSX 反例]');
+  await loadWorkbook([['业务员分组', [['业务员', '客户名称', '期末余额'],
+    ['张三', '华远', 1000], ['张三', '华远', 500], ['小计', '华远', 1500], ['李四', '东方', 800]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1500], ['东方', '未填科目', 800]]),
+    '首列业务员写小计且名称重复时，控制表只加总明细');
+
+  const totalBook = XLSX.read(workbookData([
+    ['净额', [['备注', '客户名称', '借方余额', '贷方余额'],
+      ['价税合计', '华远', 1000, 0], ['合计（本币）', null, 1000, 0],
+      [null, '东方', 0, 500], ['（本页小计）', null, 0, 500], [null, '海岚', 200, 0]]],
+    ['方向', [['部门', '客户名称', '科目名称', '期末方向', '期末余额'],
+      ['销售', '华远', '应收账款', '借', 1000], ['以上共计', '华远', '应收账款', '借', 1000],
+      ['采购', '东方', '应付账款', '贷', 500], [null, '东方', '应付账款合计', '贷', 500],
+      [null, '本表总计', null, '借', 500]]]
+  ]), { type: 'array' });
+  [
+    ['净额', [['华远', 100000], ['东方', -50000], ['海岚', 20000]], [3, 5]],
+    ['方向', [['华远', 100000], ['东方', -50000]], [3, 5, 6]]
+  ].forEach(function ([name, expectedBalances, totalRows]) {
+    const rows = XLSX.utils.sheet_to_json(totalBook.Sheets[name], { header: 1, defval: null });
+    const header = Core.detectHeader(rows);
+    const parsed = Core.parseRows(rows, header, {});
+    ok(header.usable, name + '余额表可导入');
+    eq(JSON.stringify(parsed.entities.map(e => [e.name, e.cents])), JSON.stringify(expectedBalances),
+      name + '余额保留每户明细及正确的借贷符号');
+    eq(JSON.stringify(parsed.skipped.filter(s => s.reason === '合计行').map(s => s.srcRow)),
+      JSON.stringify(totalRows), name + '余额表跳过有合计标签的原表行');
+  });
+
+  console.log('\n[第十四轮 N2 每户一行的余额表 XLSX 反例]');
+  const voucherHeader = ['客户名称', '日期', '凭证号', '摘要', '余额'];
+  const voucherRows = [
+    ['华远', '2026-06-08', '记-001', '期初', 1000], ['东方', '2026-06-11', '记-002', '期初', 500]
+  ];
+  await loadWorkbook([['往来余额', [voucherHeader, ...voucherRows]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000], ['东方', '未填科目', 500]]),
+    '每户一行的余额表即使有日期、凭证号和摘要也可导出');
+
+  const repeated = ['华远', '2026-06-12', '记-003', '调整', 300];
+  await loadWorkbook([['往来余额', [['业务员', ...voucherHeader],
+    ['张三', ...voucherRows[0]], ['小计', ...voucherRows[0]], ['李四', ...voucherRows[1]]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000], ['东方', '未填科目', 500]]),
+    '首列标记的小计行不算作同户第二笔台账');
+
+  await loadWorkbook([['期末余额', [[...voucherHeader.slice(0, -1), '期末余额'], ...voucherRows, repeated]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1300], ['东方', '未填科目', 500]]),
+    '明确的期末余额仍可按同一户的多行相加');
 }
 
 workbookRegressions().then(function () {
