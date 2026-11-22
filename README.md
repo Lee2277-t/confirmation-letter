@@ -167,7 +167,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File test\pack.ps1
 
 ## 版本
 
-v1.0.1
+v1.0.2
 
 ## 许可
 

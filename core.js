@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.1';
+  var VERSION = '1.0.2';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,14 +81,36 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
-  /** 首列为合计标签且单位有名称时，用组内明细金额核对小计。 */
-  function isTotalRow(row, header, rawName, cents, groupSum) {
+  /** 首列为合计标签且单位有名称时，用组内明细金额核对小计。
+   *  ctx: { groupSum, runSum, ambiguous }
+   *  - 金额与组内累计或全表累计相符（±5 元）→ 是合计行
+   *  - 都对不上 → 分不清是合计还是明细，标记 ambiguous，由上层拒绝整表
+   */
+  function isTotalRow(row, header, rawName, cents, ctx) {
+    var groupSum = ctx.groupSum;
+    var runSum = ctx.runSum;
     var standalone = /^(本页|本表|以上)?(合计|小计|总计|共计)$/;
     var first = str(row[0]).replace(/计\s*[（(][^（）()]*[）)]\s*$/, '计');
     var label = norm(first);
     var firstIsTotal = standalone.test(label);
     if (/^(本表|以上)?总计$|^(本表|以上)(合计|共计)$/.test(label)) return true;
-    if (firstIsTotal && (!rawName || (groupSum !== null && cents !== null && Math.abs(cents - groupSum) <= 500))) return true;
+    if (firstIsTotal) {
+      // 合计/小计就写在名称列里：这一行没有单位名，是合计行
+      if (header.nameCol === 0) return true;
+      if (!rawName || cents === null) return true;
+      var near = function (s) { return s !== null && Math.abs(cents - s) <= 500; };
+      // 「合计/总计」是全表口径，跟全表累计或组内累计比；「小计」只跟组内累计比
+      var isSubtotal = /小计/.test(label);
+      if (isSubtotal ? near(groupSum) : (near(groupSum) || near(runSum))) return true;
+      var dnNow = norm(rawName);
+      // 小计对不上组内累计、名字又出现过：分不清是合计还是明细，整表拒绝
+      if (isSubtotal && ctx.seenNames && ctx.seenNames[dnNow]) {
+        ctx.ambiguous = ctx.ambiguous || { rowNo: ctx.rowNo || 0, name: rawName, cents: cents };
+        return true;
+      }
+      // 其余情况（合计对不上、或小计带着新名字）：当明细，别把人家的钱丢了
+      return false;
+    }
 
     var labelCols = header.labelCols || [header.nameCol, header.subjectCol, header.codeCol, header.dirCol];
     for (var i = 0; i < labelCols.length; i++) {
@@ -446,17 +468,22 @@
       var namePrefixes = new Map();
       var lastName = '';
       var groupSum = null;
+      var runSum = 0;
+      var totalCtx = { groupSum: null, runSum: 0, ambiguous: null };
       var start = best.rowIndex + span;
       for (var dr = start; dr < rows.length; dr++) {
         var row = rows[dr] || [];
         var rawName = str(row[nameCol]).trim();
         var dn = norm(rawName);
         var cents = readRowAmount(row, header).cents;
-        if (isTotalRow(row, header, rawName, cents, groupSum)) {
+        totalCtx.rowNo = dr + 1;
+        totalCtx.groupSum = groupSum;
+        totalCtx.runSum = runSum;
+        if (isTotalRow(row, header, rawName, cents, totalCtx)) {
           groupSum = null;
           continue;
         }
-        if (cents !== null && (dn || lastName)) groupSum = (groupSum || 0) + cents;
+        if (cents !== null && (dn || lastName)) { groupSum = (groupSum || 0) + cents; runSum += cents; }
         if (!dn) {
           // 余额明细的空名称会沿用上一户。空行和只有备注的行不算一笔。
           if (lastName && cents !== null) dupNames = true;
@@ -601,6 +628,9 @@
     var groupSum = null;
     var ambiguous = [];  // 分不清是合计行还是续行的行号
     var unmatchedNames = [];  // 无法归到上一户的行号
+    var groupSum = null;
+    var runSum = 0;
+    var totalCtx = { groupSum: null, runSum: 0, rowNo: 0, ambiguous: null, seenNames: {} };
     for (var r = dataStart; r < rows.length; r++) {
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
@@ -615,7 +645,10 @@
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
       var amount = readRowAmount(row, header);
       var cents = amount.cents, rawAmount = amount.raw;
-      if (isTotalRow(row, header, rawName, cents, groupSum)) {
+      totalCtx.rowNo = excelRow;
+      totalCtx.groupSum = groupSum;
+      totalCtx.runSum = runSum;
+      if (isTotalRow(row, header, rawName, cents, totalCtx)) {
         skipped.push({ srcRow: excelRow, reason: '合计行', name: name, cents: cents, raw: rawAmount });
         groupSum = null;
         continue;
@@ -655,6 +688,7 @@
       }
 
       runSum += cents;
+      if (rawName) totalCtx.seenNames[norm(rawName)] = 1;
       runRows++;
       groupSum = (groupSum || 0) + cents;
       entities.push({
@@ -675,6 +709,18 @@
         problems.push(msg);
         if (header.problems && header.problems.indexOf(msg) < 0) header.problems.push(msg);
       });
+    }
+
+    // 某行写了「合计/小计」、又带着真实单位名称、金额却对不上任何累计：
+    // 分不清是合计还是明细，整表拒绝——不能把这笔钱算到那个名字头上。
+    if (totalCtx.ambiguous) {
+      var at = totalCtx.ambiguous;
+      var ambMsg = '第 ' + at.rowNo + ' 行写了「合计/小计」，却带着单位名称「' + at.name + '」，' +
+        '金额又和上面的明细合计对不上。分不清这一行是合计还是明细，' +
+        '请把它改成没有单位名称的合计行，或补上正确的单位名称后再导入。';
+      problems.push(ambMsg);
+      header.usable = false;
+      if (header.problems && header.problems.indexOf(ambMsg) < 0) header.problems.push(ambMsg);
     }
 
     if (skipped.length) {
