@@ -490,6 +490,38 @@ eq(Core.detectHeader([['客户名称', '摘要', '余额'], ['华远', '收款',
 eq(Core.detectHeader([['客户名称', '摘要', '期末余额'], ['华远', '往来', 1000]]).usable, true,
   '摘要 + 期末余额 仍然可用');
 
+
+console.log('\n[第十轮 1 逐笔台账带科目列也要拦]');
+eq(Core.detectHeader([['客户名称', '摘要', '科目', '余额'], ['华远', '收款', '应收账款', 1000]]).usable, false,
+  '带科目列的逐笔台账也是台账');
+eq(Core.detectHeader([['日期', '客户名称', '摘要', '科目', '余额'], ['2026-01-05', '华远', '收款', '应收账款', 1000]]).usable, false,
+  '带日期和科目也要拦');
+
+console.log('\n[第十轮 2 裸「（万元）」也要认]');
+eq(Core.detectHeader([['往来款项余额表', '', '', '（万元）'], ['单位名称', '期末余额'], ['华远', 128.64]]).usable, false,
+  '标题格单独写（万元）要拒');
+eq(Core.detectHeader([['单位名称', '期末余额', '（万元）'], ['华远', 128.64]]).usable, false,
+  '表头尾格写（万元）要拒');
+eq(Core.detectHeader([['单位名称', '期末余额', '（万元）'], ['华远', 1286400.5]]).usable, false,
+  '千元百万元同理');
+
+console.log('\n[第十轮 3 备注「价税合计」不能把整户丢掉]');
+const r10rows = [['单位名称', '科目', '备注', '期末余额'],
+  ['华远', '应收账款', '价税合计', 1286400.5],
+  ['东方', '应收账款', '已对账', 762000]];
+const r10h = Core.detectHeader(r10rows);
+const r10p = Core.parseRows(r10rows, r10h, {});
+const r10m = Core.mergeByName(r10p.entities);
+eq(r10m.length, 2, '两户都在');
+eq(r10m.filter(e => e.name === '华远')[0].cents, 128640050, '华远 1,286,400.50 没被当合计行');
+eq(r10p.skipped.filter(x => x.reason === '合计行').length, 0, '没有行被误判成合计行');
+
+console.log('\n[第十轮 附：真正的合计行还是跳过]');
+const r10b = Core.parseRows([['客户名称', '期末余额'], ['华远', 1000], ['东方', 500], ['合计', 1500]],
+  Core.detectHeader([['客户名称', '期末余额'], ['华远', 1000], ['东方', 500], ['合计', 1500]]), {});
+eq(Core.mergeByName(r10b.entities).length, 2, '合计行不进清单');
+eq(r10b.skipped.filter(x => x.reason === '合计行').length, 1, '合计行被记一笔');
+
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

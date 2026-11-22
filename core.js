@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.9';
+  var VERSION = '0.2.0';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,11 +81,14 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
-  /** 整行任意一格写着合计/小计，就把这行当合计行——
-   *  「合计」经常写在序号列或跨列合并，不一定落在名称列 */
-  function isTotalRow(row) {
-    for (var i = 0; i < (row || []).length; i++) {
-      var s = str(row[i]);
+  /** 标签列里写着合计/小计，就把这行当合计行。
+   *  只看名称/科目/编码/方向/首列——备注、摘要这些自由文本里出现
+   *  「价税合计」「合同合计」很常见，扫整行会把一整户静默丢掉。 */
+  function isTotalRow(row, cols) {
+    var idx = (cols && cols.length) ? cols : [0];
+    for (var i = 0; i < idx.length; i++) {
+      if (idx[i] < 0) continue;
+      var s = str((row || [])[idx[i]]);
       if (s && isTotalName(s)) return true;
     }
     return false;
@@ -336,6 +339,9 @@
         if (!us) continue;
         var um = UNIT_RE.exec(us);
         if (um) { unitWord = um[3]; break; }
+        // 裸标记：「（万元）」「万元」「(人民币万元)」——标题格或表头尾格常见这种写法
+        var bare = /^[（(]?(人民币|美元)?(百万元|万元|千元)[)）]?$/.exec(us);
+        if (bare) { unitWord = bare[2]; break; }
         // 拆成两格：「金额单位」|「人民币万元」
         var nxt = str(cells[uc + 1]).replace(/\s+/g, '');
         if (/^(单位|金额单位|计量单位)$/.test(us) && /^(人民币)?(百万元|万元|千元)$/.test(nxt)) {
@@ -374,7 +380,7 @@
     // 那种「余额」是逐笔累计余额，按单位相加会翻倍。
     var pickedHead = picked && picked.amountCol >= 0
       ? norm((rows[best.rowIndex] || [])[picked.amountCol]) : '';
-    var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(pickedHead) && !cols.subject.length;
+    var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(pickedHead);
 
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
@@ -519,7 +525,8 @@
         blank = true;
       }
       if (blank) continue;
-      if (isTotalRow(row)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
+      var labelCols = [header.nameCol, header.subjectCol, header.codeCol, header.dirCol, 0];
+      if (isTotalRow(row, labelCols)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
 
       if (!name) {
         if (cents !== null && cents !== 0) {
