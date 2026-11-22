@@ -231,6 +231,62 @@ console.log('\n[第三轮 N9 合计写法（带元/期间前缀）]');
 console.log('\n[第三轮 N7 发生额要提示]');
 const n7 = Core.detectHeader([['客户名称', '借方发生额', '贷方发生额'], ['甲', 1000, 200]]);
 ok(n7.problems.some(p => /发生额/.test(p)), '用了发生额要明说');
+
+console.log('\n[第四轮 N1 流水账要拒]');
+const f1rows = [
+  ['日期', '客户名称', '摘要', '借方金额', '贷方金额', '余额'],
+  ['2026-01-05', '华远', '收款', 1000, 0, 1000],
+  ['2026-02-05', '华远', '收款', 500, 0, 1500]
+];
+const f1 = Core.detectHeader(f1rows);
+eq(f1.usable, false, '流水账不能当往来余额表');
+ok(f1.problems.some(p => /流水账/.test(p)), '要说清楚这是流水账');
+
+console.log('\n[第四轮 N2 期初余额不能直接发函]');
+const f2rows = [['客户名称', '期初余额'], ['华远', 900]];
+const f2 = Core.detectHeader(f2rows);
+eq(f2.usable, false, '只有期初余额时不能直接出函');
+ok(f2.problems.some(p => /期初余额/.test(p)), '要提示期初不是期末');
+
+console.log('\n[第四轮 N3 合计写法（旧版能认的不能丢）]');
+['合计金额', '总计金额', '累计数', '合计数额', '合计本页', '合计 金额'].forEach(function (n) {
+  ok(Core.isTotalName(n), '「' + n + '」要认成合计行');
+});
+
+console.log('\n[第四轮 N4 四列只取期末那对]');
+const f4rows = [
+  ['科目编码', '科目名称', '客户名称', '期初借方余额', '期初贷方余额', '期末借方余额', '期末贷方余额'],
+  ['1002', '银行存款', '华远', 100, 0, 150, 0],
+  ['1002', '银行存款', '东方', 0, 200, 0, 250]
+];
+const f4 = Core.parseRows(f4rows, Core.detectHeader(f4rows), {});
+eq(f4.entities.filter(e => e.name === '华远')[0].cents, 15000, '华远取期末 150，不是期初 100');
+eq(f4.entities.filter(e => e.name === '东方')[0].cents, -25000, '东方取期末 −250');
+
+console.log('\n[第四轮 N5 期末余额 + 贷方余额 不能互相覆盖]');
+const f5rows = [['客户名称', '期末余额', '贷方余额'], ['华远', 1000, 30], ['东方', 2000, 0]];
+const f5 = Core.parseRows(f5rows, Core.detectHeader(f5rows), {});
+eq(f5.entities.filter(e => e.name === '华远')[0].cents, 100000, '华远 = 1,000');
+eq(f5.entities.filter(e => e.name === '东方')[0].cents, 200000, '东方 = 2,000');
+
+console.log('\n[第四轮 N6 「余额方向」不是金额列]');
+const f6rows = [['客户名称', '余额方向', '余额'], ['甲', '借', 1000], ['乙', '贷', 500]];
+const f6 = Core.parseRows(f6rows, Core.detectHeader(f6rows), {});
+eq(f6.entities.filter(e => e.name === '甲')[0].cents, 100000, '甲 1,000');
+eq(f6.entities.filter(e => e.name === '乙')[0].cents, -50000, '乙 −500（方向列生效）');
+
+console.log('\n[第四轮 N7 两级表头取期末那对]');
+const f7rows = [
+  ['客户名称', '期初余额', '', '本期发生额', '', '期末余额', ''],
+  ['', '借方', '贷方', '借方', '贷方', '借方', '贷方'],
+  ['甲', 0, 0, 0, 0, 0, 300],
+  ['乙', 0, 0, 0, 0, 400, 0]
+];
+const f7h = Core.detectHeader(f7rows);
+eq(f7h.span, 2, '认出两级表头');
+const f7 = Core.parseRows(f7rows, f7h, {});
+eq(f7.entities.filter(e => e.name === '甲')[0].cents, -30000, '甲 = −300（期末贷方）');
+eq(f7.entities.filter(e => e.name === '乙')[0].cents, 40000, '乙 = 400（期末借方）');
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

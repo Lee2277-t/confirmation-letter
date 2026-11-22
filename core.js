@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.3';
+  var VERSION = '0.1.4';
 
   /* ---------------- 基础 ---------------- */
 
@@ -82,17 +82,18 @@
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
   function isTotalName(name) {
-    var n = norm(name);
-    if (!n) return false;
-    // 去掉币种尾巴：「合计（元）」「累计人民币」
-    n = n.replace(/(人民币|万元|元)$/, '');
-    if (!n) return false;
-    var CORE = '合计|总计|小计|共计|总额|合计数|累计';
-    if (new RegExp('^(?:' + CORE + ')$').test(n)) return true;
-    // 「本年累计」「本期合计」「本年度合计」「上期合计」这类带期间前缀的
-    if (new RegExp('^(?:本年度|本年|本期|本月|本季|上期|上年|本页|本表|以上)*(?:' + CORE + ')$').test(n)) return true;
-    // 「合计数」「合计额」
-    if (new RegExp('^(?:合计|总计|小计|共计)(?:数|额)$').test(n)) return true;
+    var raw = norm(name).replace(/(人民币|万元|元)$/, '');
+    if (!raw) return false;
+    var CORE = '(?:合计|总计|小计|共计|总额|累计|合计数)';
+    var PREFIX = '(?:本年度|本年|本期|本月|本季|上期|上年|本页|本表|以上)?';
+    // 原样、「去掉金额/数/额」两种都要试：总额 去掉「额」就只剩「总」了
+    var cands = [raw, raw.replace(/(金额|数|额)$/, '')];
+    for (var i = 0; i < cands.length; i++) {
+      var n = cands[i];
+      if (!n) continue;
+      if (new RegExp('^' + PREFIX + CORE + '$').test(n)) return true;
+      if (new RegExp('^(?:合计|总计|小计|共计)(?:本页|本表|累计)$').test(n)) return true;
+    }
     return false;
   }
   /**
@@ -100,136 +101,252 @@
    * 标题行「往来单位期末余额表」里「单位」和「余额」在同一格，
    * 不这样排除就会把标题当表头，然后整张表读不出。
    */
+  /* ---------- 列角色 ---------- */
+
+  var NAME_STRONG = /单位名称|客户名称|供应商名称|往来单位|客户全称|单位全称/;
+  var NAME_WEAK = /单位|客户|供应商|户名|公司名称|往来|名称/;
+  var SUBJECT_WORDS = /科目名称|科目|项目名称|项目|类别|款项性质/;
+  var CODE_WORDS = /编码|编号|代码|账号|卡号|账户/;
+  var AMOUNT_WORDS = /余额|金额|发生额|数$/;
+  var DIR_WORDS = /方向/;                       // 余额方向 / 借贷方向：是标识，不是金额
+  var OPEN_WORDS = /期初|年初|上期|上月|上年年末/;  // 期初口径
+  var CLOSE_WORDS = /期末|年末|本期期末/;          // 期末口径
+  var PERIOD_WORDS = /本期|本年|累计/;             // 期间发生额
+  var FLOW_WORDS = /日期|凭证|摘要|业务|单号|票号/; // 流水账特征
+  var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
+
+  /**
+   * 给一个表头单元格定角色。
+   * side: 'D' 借方、'C' 贷方；period: 'open'|'close'|'period'|''；role: 见下
+   */
+  function roleOf(cell) {
+    var t = norm(cell);
+    if (!t) return null;
+    if (UNIT_LABEL.test(t)) return { role: 'unit' };
+    if (FLOW_WORDS.test(t)) return { role: 'flow' };
+    if (DIR_WORDS.test(t)) return { role: 'dir' };
+    if (CODE_WORDS.test(t)) return { role: 'code' };
+    // 「科目名称」两重身份：既是科目，也可能是这张表里唯一的名字列（科目余额表）
+    if (SUBJECT_WORDS.test(t)) {
+      return /名称$/.test(t) ? { role: 'name', rank: 1, subject: true } : { role: 'subject' };
+    }
+
+    var side = /借方/.test(t) ? 'D' : (/贷方/.test(t) ? 'C' : '');
+    var period = OPEN_WORDS.test(t) ? 'open'
+      : (CLOSE_WORDS.test(t) ? 'close'
+        : (PERIOD_WORDS.test(t) ? 'period' : ''));
+    var isAmount = AMOUNT_WORDS.test(t) || side !== '' || period !== '';
+
+    if (NAME_STRONG.test(t) && !CODE_WORDS.test(t)) {
+      return { role: 'name', rank: 3 };
+    }
+    if (isAmount) {
+      // 「发生额」「本期」是流量，不是余额
+      var kind = (period === 'period' || /发生额/.test(t) ||
+        (/金额/.test(t) && !/余额/.test(t))) ? 'flow' : 'balance';
+      return { role: 'amount', side: side, period: period, kind: kind };
+    }
+    if (NAME_WEAK.test(t)) return { role: 'name', rank: 2 };
+    return { role: 'other' };
+  }
+
+  /** 一行能不能当表头：至少一个名称角色 + 一个金额角色，且必须是不同列 */
   function analyzeRow(row) {
-    var nameCols = [], amountCols = [], subjectCols = [], codeCols = [], nameRank = {};
-    var debitCols = [], creditCols = [];
+    var cols = { name: [], amount: [], subject: [], code: [], dir: [], flow: [] };
     (row || []).forEach(function (cell, c) {
-      var t = norm(cell);
-      if (!t) return;
-      if (UNIT_LABEL.test(t)) return;
-      var isCode = CODE_WORDS.test(t);
-      var isDebit = DEBIT_WORDS.test(t);
-      var isCredit = CREDIT_WORDS.test(t);
-      if (isDebit) { debitCols.push(c); return; }
-      if (isCredit) { creditCols.push(c); return; }
-      if (isCode) { codeCols.push(c); return; }
-      if (NAME_WORDS.test(t)) {
-        nameCols.push(c);
-        // 记下优先级：「客户名称」比「科目名称」更像函证对象
-        (nameRank[c] = /单位名称|客户名称|供应商名称|往来单位|客户全称/.test(t) ? 3
-          : (/科目名称|项目名称/.test(t) ? 1 : 2));
-        return;
-      }
-      if (AMOUNT_WORDS.test(t)) { amountCols.push(c); return; }
-      if (SUBJECT_WORDS.test(t)) subjectCols.push(c);
+      var r = roleOf(cell);
+      if (!r) return;
+      if (r.role === 'name') cols.name.push({ c: c, rank: r.rank });
+      else if (r.role === 'amount') cols.amount.push({ c: c, side: r.side, period: r.period, kind: r.kind });
+      else if (r.role === 'subject') cols.subject.push(c);
+      else if (r.role === 'code') cols.code.push(c);
+      else if (r.role === 'dir') cols.dir.push(c);
+      else if (r.role === 'flow') cols.flow.push(c);
     });
-    // 借贷两列都在，就不用单列余额
-    var hasBoth = debitCols.length > 0 && creditCols.length > 0;
-    // 只有一列「借方余额」也照样能读：借方为正
-    var hasOneSide = !hasBoth && (debitCols.length > 0 || creditCols.length > 0);
-    // 只有一列时：借方余额当正数用；贷方余额要记成负数，单独走 creditOnly 分支
-    if (hasOneSide && debitCols.length) amountCols = amountCols.concat(debitCols);
-    if (hasOneSide && creditCols.length) amountCols = amountCols.concat(creditCols);
-    var score = nameCols.length * 3 + (hasBoth ? 3 : amountCols.length * 2) +
-      subjectCols.length + (codeCols.length ? 1 : 0);
-    if (!nameCols.length || (!amountCols.length && !hasBoth)) score = 0;
-    return {
-      score: score, nameCols: nameCols, amountCols: amountCols, nameRank: nameRank,
-      subjectCols: subjectCols, codeCols: codeCols,
-      debitCols: debitCols, creditCols: creditCols, hasBoth: hasBoth
-    };
+    var score = 0;
+    if (cols.name.length && cols.amount.length) {
+      score = cols.name.length * 3 + Math.min(cols.amount.length, 4) * 2
+        + cols.subject.length + (cols.code.length ? 1 : 0);
+      // 科目名称单独出现、又没有客户/单位字样时，更像科目余额表，分数压低
+      var bestName = cols.name.slice().sort(function (a, b) { return b.rank - a.rank; })[0];
+      if (bestName && bestName.rank < 2) score -= 2;
+    }
+    return { score: score, cols: cols };
   }
 
   /**
-   * 找表头。要求至少一个「名称」列 + 一个「金额」列（或借贷两列）。
-   * 找不到就返回 rowIndex:-1 和原因，不硬猜。
+   * 两级表头：上一行是「期初余额 / 期末余额」这种分组，下一行是「借方 / 贷方」。
+   * 合成 span=2，每个金额列的期间取自上一行、借贷方向取自下一行。
+   */
+  function analyzeTwoLevel(topRow, subRow) {
+    // 标题行 vs 两级表头：真正的两级表头里，名称列只在上一行出现一次；
+    // 标题行则会在下一行再出现一个名称列（同一列）
+    var nameRepeat = false;
+    (topRow || []).forEach(function (cell, c) {
+      var r = roleOf(cell);
+      if (!r || r.role !== 'name') return;
+      var r2 = roleOf((subRow || [])[c]);
+      if (r2 && r2.role === 'name') nameRepeat = true;
+    });
+    if (nameRepeat) return { score: 0, cols: null };
+
+    var groups = [], lastGroup = '';
+    (topRow || []).forEach(function (cell) {
+      var t = norm(cell);
+      if (t) {
+        if (OPEN_WORDS.test(t)) lastGroup = 'open';
+        else if (CLOSE_WORDS.test(t)) lastGroup = 'close';
+        else if (PERIOD_WORDS.test(t)) lastGroup = 'period';
+        else if (AMOUNT_WORDS.test(t)) lastGroup = lastGroup || '';
+      }
+      groups.push(lastGroup);
+    });
+    var cols = { name: [], amount: [], subject: [], code: [], dir: [], flow: [] };
+    (topRow || []).forEach(function (cell, c) {
+      var r = roleOf(cell);
+      if (!r) return;
+      if (r.role === 'name') cols.name.push({ c: c, rank: r.rank });
+      else if (r.role === 'subject') cols.subject.push(c);
+      else if (r.role === 'code') cols.code.push(c);
+      else if (r.role === 'dir') cols.dir.push(c);
+      else if (r.role === 'flow') cols.flow.push(c);
+    });
+    (subRow || []).forEach(function (cell, c) {
+      var t = norm(cell);
+      if (!t) return;
+      var side = /借方/.test(t) ? 'D' : (/贷方/.test(t) ? 'C' : '');
+      if (!side) {
+        // 下一行也可能直接写「期末余额」这种单层列
+        var r2 = roleOf(cell);
+        if (r2 && r2.role === 'amount') {
+          cols.amount.push({ c: c, side: r2.side, period: groups[c] || r2.period, kind: r2.kind });
+        }
+        return;
+      }
+      cols.amount.push({ c: c, side: side, period: groups[c] || '', kind: 'balance' });
+    });
+    var score = 0;
+    // 必须真的分了组：下一行至少两列带借贷方向
+    var sided = cols.amount.filter(function (a) { return !!a.side; }).length;
+    if (cols.name.length && cols.amount.length && sided >= 2) {
+      score = cols.name.length * 3 + Math.min(cols.amount.length, 6) * 2 + cols.subject.length + 3;
+    }
+    return { score: score, cols: cols };
+  }
+
+  /** 从金额列里挑出要用的那一组：期末 > 未标 > 期间 > 期初 */
+  function pickAmount(cols) {
+    // 发生额不是余额：整张表只有发生额时，不能拿来发函
+    var bal = cols.filter(function (a) { return a.kind === 'balance'; });
+    if (!bal.length) return { flowOnly: true };
+    cols = bal;
+    var rankOf = function (p) {
+      return p === 'close' ? 4 : (p === '' ? 3 : (p === 'period' ? 2 : 1));
+    };
+    var best = null;
+    cols.forEach(function (a) {
+      var r = rankOf(a.period) * 10 + (a.kind === 'balance' ? 5 : 0);
+      if (!best || r > best.r) best = { r: r, a: a };
+    });
+    if (!best) return null;
+    var period = best.a.period;
+    // 同一期间里，借贷两列配对成净额；只有一列就按单边处理
+    var D = cols.filter(function (a) { return a.period === period && a.side === 'D'; })[0];
+    var C = cols.filter(function (a) { return a.period === period && a.side === 'C'; })[0];
+    var plain = cols.filter(function (a) { return a.period === period && !a.side && a.kind === 'balance'; })[0];
+    if (D && C) return { debitCol: D.c, creditCol: C.c, amountCol: -1, period: period };
+    if (D) return { debitCol: -1, creditCol: -1, amountCol: D.c, period: period, positive: true };
+    if (C) return { debitCol: -1, creditCol: C.c, amountCol: -1, period: period };
+    if (plain) return { debitCol: -1, creditCol: -1, amountCol: plain.c, period: period };
+    var any = cols.filter(function (a) { return a.period === period; })[0];
+    return { debitCol: -1, creditCol: -1, amountCol: any.c, period: period, kind: any.kind };
+  }
+
+  /**
+   * 找表头。返回各列位置 + usable（能不能用来发函）+ problems（提示，不影响 usable）。
    */
   function detectHeader(rows) {
     var limit = Math.min(rows.length, 20);
     var best = { rowIndex: -1, score: 0 };
+
     for (var r = 0; r < limit; r++) {
-      var a = analyzeRow(rows[r]);
-      if (a.score > best.score) best = { rowIndex: r, score: a.score, a: a };
-    }
-    if (best.rowIndex < 0 || best.score < 5) {
-      return { rowIndex: -1, nameCol: -1, amountCol: -1, subjectCol: -1, codeCol: -1,
-        debitCol: -1, creditCol: -1, dirCol: -1,
-        problems: ['找不到能认的表头（需要一列单位/客户名称，一列余额或金额）'] };
-    }
-
-    var a2 = best.a;
-    // 同一行既有「科目名称」又有「客户名称」时，函证对象是后者
-    var nameCol = a2.nameCols.slice().sort(function (x, y) {
-      return (a2.nameRank[y] || 0) - (a2.nameRank[x] || 0) || x - y;
-    })[0];
-    var amountCol = -1, amountRank = -1, debitCol = -1, creditCol = -1, dirCol = -1;
-    var row = rows[best.rowIndex] || [];
-
-    if (a2.hasBoth) {
-      debitCol = a2.debitCols[0];
-      creditCol = a2.creditCols[0];
-    } else {
-      a2.amountCols.forEach(function (c) {
-        var t = norm(row[c]);
-        // 「期末余额」优先于「发生额」，避免拿到借方发生额
-        var rank = /期末余额|期末数/.test(t) ? 3 : (/余额/.test(t) ? 2 : 1);
-        if (rank > amountRank) { amountRank = rank; amountCol = c; }
-      });
+      var one = analyzeRow(rows[r]);
+      if (one.score > best.score) best = { rowIndex: r, score: one.score, span: 1, a: one };
+      if (r + 1 < limit) {
+        var two = analyzeTwoLevel(rows[r], rows[r + 1]);
+        if (two.score > best.score) best = { rowIndex: r, score: two.score, span: 2, a: two };
+      }
     }
 
-    // 方向列（借/贷）会影响金额符号
-    for (var c2 = 0; c2 < row.length; c2++) {
-      if (/^(方向|借贷方向|余额方向)$/.test(norm(row[c2]))) { dirCol = c2; break; }
+    if (best.rowIndex < 0 || best.score < 4) {
+      return {
+        rowIndex: -1, span: 1, nameCol: -1, amountCol: -1, subjectCol: -1, codeCol: -1,
+        debitCol: -1, creditCol: -1, dirCol: -1, usable: false, amountKind: '',
+        problems: ['找不到能认的表头（需要一列单位/客户名称，一列余额或金额）']
+      };
     }
 
-    // 只有「贷方余额」一列：记成负数，不能当正数
-    if (creditCol < 0 && debitCol < 0 && a2.creditCols.length && !a2.debitCols.length) {
-      creditCol = a2.creditCols[0];
-      amountCol = -1;
-    }
-
+    var a = best.a, cols = a.cols;
     var problems = [];
-    if (debitCol < 0 && creditCol < 0 && amountCol < 0) problems.push('没找到余额或金额列');
-    if (amountCol >= 0 && /发生额/.test(norm(row[amountCol]))) {
-      problems.push('金额列是「发生额」，不是余额——确认这是你要函证的数');
-    }
-    if (debitCol >= 0 && creditCol >= 0) {
-      problems.push('检测到「借方余额」和「贷方余额」两列，按 借−贷 合成净额');
-    }
+    var span = best.span;
 
-    // 借方余额、贷方余额、方向列三者同时出现时，符号会取反两次
-    if ((debitCol >= 0 || creditCol >= 0) && dirCol >= 0) {
-      problems.push('同时有借贷余额列和方向列，已按借贷两列算净额，方向列不再重复取反');
-    }
-
-    // 表头里写的是「科目名称」而不是单位/客户：这是科目余额表，不是往来明细
-    var nameHead = norm(row[nameCol]);
-    var codeHead = a2.codeCols.length ? norm(row[a2.codeCols[0]]) : '';
+    // 名称列：客户/单位优先，其次泛称，最后才是科目名称
+    var nameCol = cols.name.slice().sort(function (x, y) {
+      return y.rank - x.rank || x.c - y.c;
+    })[0].c;
+    var nameHead = norm((rows[best.rowIndex] || [])[nameCol]);
     var nameIsCounterparty = /单位|客户|供应商|户名|往来/.test(nameHead);
-    // 「科目编码 + 名称/科目名称」= 科目余额表；
-    // 但只要名称列明确是客户/单位，就是带辅助核算的往来表，能用
-    var subjectLike = !nameIsCounterparty &&
-      (/科目名称|项目名称|^科目$/.test(nameHead) || (/科目|项目/.test(codeHead) && nameHead === '名称'));
-    if (subjectLike) {
-      problems.push('这张表看起来是科目余额表（科目编码 + 科目名称），不是往来单位明细');
+
+    var picked = pickAmount(cols.amount);
+    var flowOnly = !!(picked && picked.flowOnly);
+    var amountCol = picked && !flowOnly ? picked.amountCol : -1;
+    var debitCol = picked && !flowOnly ? picked.debitCol : -1;
+    var creditCol = picked && !flowOnly ? picked.creditCol : -1;
+
+    // 流水账：有日期/凭证/摘要，且金额是「借/贷」两列 —— 每行是一笔交易，不是每个单位的余额
+    var hasSidedCols = cols.amount.some(function (a) { return !!a.side; });
+    // 有日期/凭证/摘要，又有借方、贷方这类列 —— 就是流水账
+    var isFlow = cols.flow.length > 0 && hasSidedCols;
+    // 只有期初余额：函证要的是截止日余额，期初会误导
+    var isOpening = picked && picked.period === 'open';
+    // 只有发生额：同样不是余额
+    var isPeriod = picked && picked.period === 'period';
+    var isSubjectTable = !nameIsCounterparty &&
+      (/科目名称|项目名称|^科目$/.test(nameHead) ||
+        (cols.code.length && /科目|项目/.test(norm((rows[best.rowIndex] || [])[cols.code[0]])) && nameHead === '名称'));
+
+    if (debitCol >= 0 && creditCol >= 0) problems.push('检测到借方、贷方两列，按 借−贷 合成净额');
+    if (span === 2) problems.push('两级表头：期间取自上一行，借贷取自下一行');
+    if (isFlow) problems.push('这张表看起来是流水账（有日期/凭证/摘要），每行是一笔交易，不是每个单位的余额——请换成往来余额表');
+    if (isOpening) problems.push('用的是「期初余额」，函证要的是截止日（期末）余额——请确认这张表是不是期末数');
+    if (isPeriod) problems.push('用的是「发生额」，不是余额——函证金额通常是余额');
+    if (isSubjectTable) problems.push('这张表看起来是科目余额表（科目编码 + 科目名称），不是往来单位明细');
+    if (flowOnly) problems.push('这张表只有「发生额」，没有余额——函证金额通常取余额，请换成余额表');
+    if (cols.dir.length && (debitCol >= 0 || creditCol >= 0)) {
+      problems.push('同时有借贷列和方向列，已按借贷两列算净额，方向列不再重复取反');
     }
+
+    var usable = nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) &&
+      !isSubjectTable && !isFlow && !flowOnly && !isOpening;
+
+    var kind = '';
+    if (debitCol >= 0 || creditCol >= 0) kind = '余额';
+    else if (amountCol >= 0) kind = picked && picked.kind === 'flow' ? '发生额' : '余额';
 
     return {
-      rowIndex: best.rowIndex, nameCol: nameCol, amountCol: amountCol,
-      subjectCol: a2.subjectCols.length ? a2.subjectCols[0] : -1,
-      codeCol: a2.codeCols.length ? a2.codeCols[0] : -1,
-      debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
-      usable: nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) && !subjectLike,
-      amountKind: (debitCol >= 0 || creditCol >= 0) ? '余额'
-        : (amountCol >= 0 ? (/期末余额|期末数/.test(norm(row[amountCol])) ? '余额'
-          : (/余额/.test(norm(row[amountCol])) ? '余额' : '发生额')) : ''),
+      rowIndex: best.rowIndex, span: span,
+      nameCol: nameCol, amountCol: amountCol,
+      subjectCol: cols.subject.length ? cols.subject[0] : -1,
+      codeCol: cols.code.length ? cols.code[0] : -1,
+      debitCol: debitCol, creditCol: creditCol,
+      dirCol: cols.dir.length ? cols.dir[0] : -1,
+      creditOnly: creditCol >= 0 && debitCol < 0,
+      period: picked ? picked.period : '',
+      usable: usable,
+      amountKind: kind,
       problems: problems
     };
   }
-  /**
-   * 按表头读出一行行对象。
-   * 读不出金额的行不能丢：单独记进 skipped，并说明原因。
-   */
   function parseRows(rows, header, opts) {
     opts = opts || {};
     var firstExcelRow = opts.firstExcelRow || 1;
@@ -238,13 +355,15 @@
     var problems = (header.problems || []).slice();
 
     var useDebitCredit = header.debitCol >= 0 && header.creditCol >= 0;
-    var creditOnlyGuard = header.creditCol >= 0 && header.debitCol < 0;
+    var creditOnly = !!header.creditOnly;
     if (header.rowIndex < 0 || header.nameCol < 0 ||
-        (!useDebitCredit && !creditOnlyGuard && header.amountCol < 0)) {
+        (!useDebitCredit && !creditOnly && header.amountCol < 0)) {
       return { entities: [], skipped: [], problems: problems };
     }
+    // 两级表头占两行，数据从再下一行开始；单级表头下一行就是数据
+    var dataStart = header.rowIndex + (header.span === 2 ? 2 : 1);
 
-    for (var r = header.rowIndex + 1; r < rows.length; r++) {
+    for (var r = dataStart; r < rows.length; r++) {
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
       var name = str(row[header.nameCol]).trim();
@@ -252,13 +371,11 @@
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
 
       var cents = null, rawAmount = '', how = '', unreadable = '';
-      var creditOnly = header.creditCol >= 0 && header.debitCol < 0;
 
       if (useDebitCredit) {
         var dRaw = row[header.debitCol], cRaw = row[header.creditCol];
         var d = toCents(dRaw), cr = toCents(cRaw);
-        // 一格有内容却读不出（「待核实」「#REF!」）不能当 0：
-        // 借 1,000 / 贷「待核实」被算成净 1,000，错得毫无提示
+        // 一格有内容却读不出（「待核实」「#REF!」）不能当 0
         if (str(dRaw).trim() !== '' && d === null) unreadable = '借方';
         else if (str(cRaw).trim() !== '' && cr === null) unreadable = '贷方';
         if (unreadable) cents = null;
@@ -269,7 +386,7 @@
       } else if (creditOnly) {
         rawAmount = row[header.creditCol];
         cents = toCents(rawAmount);
-        // 只有「贷方余额」一列时，贷方余额是负数，不能当正数
+        // 只有「贷方余额」一列时，贷方余额是负数
         if (cents !== null) cents = -cents;
         how = '贷方余额';
       } else {
@@ -282,8 +399,7 @@
         continue;
       }
 
-      // 方向列：写「贷」的当负数（往来表里预收/应付常见）。
-      // 借贷两列本身已经带符号，再按方向取反会翻两次。
+      // 方向列：写「贷」的当负数。借贷两列本身带符号，再取反会翻两次。
       if (cents !== null && header.dirCol >= 0 && !useDebitCredit && !creditOnly) {
         var dir = norm(row[header.dirCol]);
         if (/^贷/.test(dir) && cents > 0) cents = -cents;
@@ -295,7 +411,6 @@
       if (isTotalName(name)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name }); continue; }
 
       if (!name) {
-        // 有金额没名字：不能静默丢，否则这笔钱在函证清单里彻底消失
         if (cents !== null && cents !== 0) {
           skipped.push({ srcRow: excelRow, reason: '没有单位名称', name: '', cents: cents });
         }
