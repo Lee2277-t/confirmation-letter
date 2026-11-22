@@ -439,6 +439,57 @@ eq(k1.nameCol, 0, '名字列就是核算项目');
 const k2 = Core.detectHeader([['科目编码', '科目名称', '核算项目', '期末余额'], ['1122', '应收账款', '华远', 1000]]);
 eq(k2.usable, true, '带科目编码的辅助核算表也能用');
 
+
+console.log('\n[第九轮 1 合计行标签的各种写法]');
+['合计', '合计（人民币元）', '合计人民币元', '合计（单位：元）', '应收账款小计', '应收账款合计',
+ '人民币合计', '合计（本位币）', '合计（原币）', '本页合计', '合计数额', '累计数'].forEach(function (n) {
+  ok(Core.isTotalName(n), '「' + n + '」要认成合计行');
+});
+['合计贸易有限公司', '华远科技有限公司', '应收账款', '预收账款'].forEach(function (n) {
+  ok(!Core.isTotalName(n), '「' + n + '」是名字，不是合计行');
+});
+const r9rows = [['客户名称', '科目', '期末余额'], ['华远', '应收账款', 1000], ['东方', '应收账款', 500], ['', '应收账款合计', 1500]];
+const r9m = Core.mergeByName(Core.parseRows(r9rows, Core.detectHeader(r9rows), {}).entities);
+eq(r9m.filter(e => e.name === '东方')[0].cents, 50000, '合计（写科目列）不再加到东方');
+
+console.log('\n[第九轮 2 人民币万元的各种写法]');
+const r9u1 = Core.detectHeader([['往来表'], ['金额单位：人民币万元'], ['单位名称', '期末余额'], ['华远', 128.64]]);
+eq(r9u1.usable, false, '「金额单位：人民币万元」要拒');
+const r9u2 = Core.detectHeader([['客户名称', '期末余额（人民币万元）'], ['华远', 128.64]]);
+eq(r9u2.usable, false, '列名带人民币万元要拒');
+const r9u3 = Core.detectHeader([['单位名称', '期末余额'], ['华远', 128.64], ['单位：人民币万元']]);
+eq(r9u3.usable, false, '页脚人民币万元要拒');
+const r9u4 = Core.detectHeader([['往来表', '', ''], ['金额单位', '万元'], ['单位名称', '期末余额'], ['华远', 128.64]]);
+eq(r9u4.usable, false, '拆成两格也要拒');
+const r9u5 = Core.detectHeader([['往来表'], ['金额单位：人民币元'], ['单位名称', '期末余额'], ['华远', 1286400.5]]);
+eq(r9u5.usable, true, '「人民币元」是正常单位');
+
+console.log('\n[第九轮 3 核算项目编码/类别不能当名字]');
+const r9k1 = Core.detectHeader([['核算项目编码', '核算项目名称', '科目', '期末余额'], ['001', '华远', '应收账款', 1000]]);
+eq(r9k1.nameCol, 1, '名字取「核算项目名称」，不是编码');
+const r9k2 = Core.detectHeader([['核算项目类别', '核算项目编码', '核算项目名称', '期末余额'], ['客户', '001', '华远', 1000]]);
+eq(r9k2.nameCol, 2, '类别和编码都跳过');
+
+console.log('\n[第九轮 4 借贷表的格式空行不能被报成金额读不出]');
+const r9b4rows = [['客户名称', '借方余额', '贷方余额'], ['甲', 1000, 0], ['乙', 0, 500]];
+for (let i = 0; i < 20; i++) r9b4rows.push(['', '', '']);
+const r9b4 = Core.parseRows(r9b4rows, Core.detectHeader(r9b4rows), {});
+eq(Core.mergeByName(r9b4.entities).length, 2, '两户');
+eq(r9b4.skipped.filter(x => x.reason === '金额读不出').length, 0, '空行不算读不出');
+
+console.log('\n[第九轮 5 控制表科目列要写「未填科目」]');
+const r9e5rows = [['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000000], ['', '预收账款', -300000], ['', '', 200000]];
+const r9e5res = Core.selectEntities(Core.mergeByName(Core.parseRows(r9e5rows, Core.detectHeader(r9e5rows), {}).entities), { mode: 'all' });
+const r9e5ctl = Core.controlRows(r9e5res, {});
+const r9e5row = r9e5ctl.filter(r => r && r[1] === '华远')[0];
+ok(r9e5row && /未填科目/.test(String(r9e5row[2])), '控制表科目要包含「未填科目」（实际：' + (r9e5row ? r9e5row[2] : '无') + '）');
+
+console.log('\n[第九轮 6 逐笔「余额」台账要拒]');
+eq(Core.detectHeader([['客户名称', '摘要', '余额'], ['华远', '收款', 1000], ['华远', '收款', 1500]]).usable, false,
+  '摘要 + 单个「余额」是逐笔台账');
+eq(Core.detectHeader([['客户名称', '摘要', '期末余额'], ['华远', '往来', 1000]]).usable, true,
+  '摘要 + 期末余额 仍然可用');
+
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

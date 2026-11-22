@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.8';
+  var VERSION = '0.1.9';
 
   /* ---------------- 基础 ---------------- */
 
@@ -92,17 +92,24 @@
   }
 
   function isTotalName(name) {
-    var raw = norm(name).replace(/(人民币|万元|元)$/, '');
+    var raw = norm(name);
     if (!raw) return false;
-    var CORE = '(?:合计|总计|小计|共计|总额|累计|合计数)';
-    var PREFIX = '(?:本年度|本年|本期|本月|本季|上期|上年|本页|本表|以上)?';
-    // 原样、「去掉金额/数/额」两种都要试：总额 去掉「额」就只剩「总」了
-    var cands = [raw, raw.replace(/(金额|数|额)$/, '')];
-    for (var i = 0; i < cands.length; i++) {
-      var n = cands[i];
-      if (!n) continue;
-      if (new RegExp('^' + PREFIX + CORE + '$').test(n)) return true;
-      if (new RegExp('^(?:合计|总计|小计|共计)(?:本页|本表|累计)$').test(n)) return true;
+    // 先去掉干扰项：括号里的说明、币种、单位、空格
+    // 「合计（人民币元）」「人民币合计」「应收账款合计」都归到「合计」
+    var s = raw
+      .replace(/[（(][^）)]*[）)]/g, '')
+      .replace(/人民币元|人民币|美元|欧元|本位币|原币|折算|单位|金额|数量|元/g, '')
+      .replace(/[\s:：、,，.。]/g, '');
+    if (!s) return false;
+    // 一层层剥掉结尾的「数/额」：「合计数额」「合计累计数」都能归位
+    var n = s;
+    for (var ci = 0; ci < 4; ci++) {
+      // 只看结尾：「合计贸易有限公司」是客户名，不是合计行
+      if (/(合计|小计|总计|共计|累计|总额)$/.test(n)) return true;
+      if (/^(合计|小计|总计|共计|累计|总额)(本页|本表|以上)?$/.test(n)) return true;
+      var stripped = n.replace(/(数|额)$/, '');
+      if (stripped === n) break;
+      n = stripped;
     }
     return false;
   }
@@ -136,8 +143,13 @@
     if (UNIT_LABEL.test(t)) return { role: 'unit' };
     if (FLOW_WORDS.test(t)) return { role: 'flow' };
     if (DIR_WORDS.test(t)) return { role: 'dir' };
-    // 金蝶把往来单位叫「核算项目」，它就是函证对象
-    if (/核算项目|辅助核算/.test(t)) return { role: 'name', rank: 2 };
+    // 金蝶把往来单位叫「核算项目」，它就是函证对象；
+    // 但「核算项目编码」「核算项目类别」是编码和分类，不能当名字
+    if (/核算项目|辅助核算/.test(t)) {
+      if (/编码|代码|编号/.test(t)) return { role: 'code' };
+      if (/类别|类型|分类/.test(t)) return null;
+      return { role: 'name', rank: 2 };
+    }
     if (CODE_WORDS.test(t)) return { role: 'code' };
     // 「科目名称」两重身份：既是科目，也可能是这张表里唯一的名字列（科目余额表）
     if (SUBJECT_WORDS.test(t)) {
@@ -316,16 +328,18 @@
     // 金额单位只认元。见到万元/千元/百万元（连同单位、金额、余额这类词）就拒绝：
     // 自动换算猜错就是一万倍的差错。页脚、列名后缀、注释里写的也算。
     var unitWord = '';
+    var UNIT_RE = /(单位|金额|余额|计量|为)\s*[:：]?\s*[（(]?\s*(人民币)?\s*(百万元|万元|千元)/;
     for (var ur = 0; ur < rows.length && !unitWord; ur++) {
       var cells = rows[ur] || [];
       for (var uc = 0; uc < cells.length; uc++) {
-        var us = str(cells[uc]);
+        var us = str(cells[uc]).replace(/\s+/g, '');
         if (!us) continue;
-        var um = /(百万元|万元|千元)/.exec(us);
-        if (!um) continue;
-        // 「注：超过100万元的客户请重点函证」这类正文不算声明
-        if (/(单位|金额|余额|计量|为)\s*[:：]?\s*[（(]?\s*(百万元|万元|千元)/.test(us)) {
-          unitWord = um[1];
+        var um = UNIT_RE.exec(us);
+        if (um) { unitWord = um[3]; break; }
+        // 拆成两格：「金额单位」|「人民币万元」
+        var nxt = str(cells[uc + 1]).replace(/\s+/g, '');
+        if (/^(单位|金额单位|计量单位)$/.test(us) && /^(人民币)?(百万元|万元|千元)$/.test(nxt)) {
+          unitWord = nxt.replace(/^人民币/, '');
           break;
         }
       }
@@ -356,6 +370,12 @@
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
     var isPeriod = picked && picked.kind === 'flow';
+    // 逐笔台账：有摘要/日期，只有一个「余额」列（没有期末字样），也没有科目列。
+    // 那种「余额」是逐笔累计余额，按单位相加会翻倍。
+    var pickedHead = picked && picked.amountCol >= 0
+      ? norm((rows[best.rowIndex] || [])[picked.amountCol]) : '';
+    var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(pickedHead) && !cols.subject.length;
+
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
         (cols.code.length && /科目|项目/.test(norm((rows[best.rowIndex] || [])[cols.code[0]]))));
@@ -386,12 +406,13 @@
       }).join('、') + '），分不清该函哪一列——请只保留要函证的那一列，或加一列「期末余额」。');
     }
     if (flowOnly) problems.push('这张表只有「发生额」，没有余额——函证金额通常取余额，请换成余额表');
+    if (isLedger) problems.push('这张表像是逐笔明细台账（有摘要/日期，只有一个「余额」），余额是逐笔累计的，按单位相加会翻倍——请换成按单位汇总的余额表');
     if (cols.dir.length && (debitCol >= 0 || creditCol >= 0)) {
       problems.push('同时有借贷列和方向列，已按借贷两列算净额，方向列不再重复取反');
     }
 
     var usable = nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) &&
-      !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide;
+      !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide && !isLedger;
 
     var kind = '';
     if (debitCol >= 0 || creditCol >= 0) kind = '余额';
@@ -493,6 +514,10 @@
 
       // 整行都空的才算空行——用原始值判断，不能用沿用后的名称
       var blank = !rawName && str(rawAmount).trim() === '' && !rawSubject && !code;
+      if (useDebitCredit && !rawName && !rawSubject && !code &&
+        str(row[header.debitCol]).trim() === '' && str(row[header.creditCol]).trim() === '') {
+        blank = true;
+      }
       if (blank) continue;
       if (isTotalRow(row)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
 
@@ -658,6 +683,13 @@
    * 函证控制表：审计底稿里要能直接用的那种。
    * 后面几列（发函/回函/差异）留空给人工登记，不预填假数据。
    */
+  /** 控制表/列表里的科目文字：没填科目的部分也要写出来，否则底稿上钱没有归属 */
+  function subjectTextOf(s) {
+    var list = (s.subjects || []).slice();
+    if (s.noSubjectCents) list.push('未填科目');
+    return list.join('、');
+  }
+
   function controlRows(result, opts) {
     opts = opts || {};
     var head = [
@@ -669,7 +701,7 @@
     ];
     result.selected.forEach(function (s) {
       head.push([
-        s.no, s.name, (s.subjects || []).join('、'),
+        s.no, s.name, subjectTextOf(s),
         s.cents / 100, s.cents / 100, s.reason,
         '', '', '', '', ''
       ]);
