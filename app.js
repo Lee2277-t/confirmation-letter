@@ -52,6 +52,11 @@
     try { return XLSX.utils.decode_range(ws['!ref']).s.r; } catch (e) { return 0; }
   }
 
+  /**
+   * 多张表都能读时挑哪张。
+   * 关键是「余额表」优先于「流水/发生额表」——流水表行数多得多，
+   * 只按行数挑会把整批函做成用发生额出的。
+   */
   function pickSheet(wb) {
     var best = null;
     wb.SheetNames.forEach(function (name) {
@@ -59,19 +64,34 @@
       var h = Core.detectHeader(rows);
       if (h.rowIndex < 0) return;
       if (h.usable === false) return;
-      var n = h.rowIndex >= 0 ? rows.length : 0;
-      var score = 100 + n / 1000;
+      var score = 100 + (h.amountKind === '余额' ? 30 : 0) + Math.min(rows.length, 2000) / 1000;
       if (!best || score > best.score) best = { name: name, rows: rows, header: h, score: score };
     });
     return best;
   }
 
+  /** CSV 可能是 GBK（Excel 另存的默认编码），先按 UTF-8 严解，失败再按 GBK */
+  function decodeCsv(buf) {
+    var u8 = new Uint8Array(buf);
+    if (u8.length > 3 && u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) {
+      return new TextDecoder('utf-8').decode(u8.subarray(3));
+    }
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(u8); }
+    catch (e) {
+      try { return new TextDecoder('gbk').decode(u8); }
+      catch (e2) { return new TextDecoder('utf-8').decode(u8); }
+    }
+  }
+
   function readWorkbook(file) {
     return new Promise(function (resolve) {
       var reader = new FileReader();
+      var isCsv = /\.csv$/i.test(file.name || '');
       reader.onload = function () {
         try {
-          var wb = XLSX.read(new Uint8Array(reader.result), { type: 'array', cellDates: false });
+          var wb = isCsv
+            ? XLSX.read(decodeCsv(reader.result), { type: 'string', cellDates: false })
+            : XLSX.read(new Uint8Array(reader.result), { type: 'array', cellDates: false });
           resolve({ ok: true, wb: wb, fileName: file.name });
         } catch (e) {
           resolve({ ok: false, error: e.message });

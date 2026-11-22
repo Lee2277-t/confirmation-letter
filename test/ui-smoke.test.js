@@ -294,6 +294,29 @@ async function loadFile(rows, sheetName) {
   ok(covBefore && covAfter, '能读到覆盖率');
   ok(covBefore && covAfter && covBefore[1] !== covAfter[1], '勾上小户后覆盖率要变（' + (covBefore && covBefore[1]) + '% → ' + (covAfter && covAfter[1]) + '%）');
   ok(covAfter && Math.abs(parseFloat(covAfter[1]) - 100) < 0.05, '两户都函，覆盖率就是 100%');
+
+  console.log('\n[多张表：余额表优先于流水表]');
+  {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(
+      [['客户名称', '借方发生额', '贷方发生额']].concat(
+        Array.from({ length: 30 }, (_, i) => ['客户' + i, 1000 + i, 0])
+      )), '流水');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(
+      [['客户名称', '期末余额'], ['华远科技有限公司', 1000000], ['东方建设', 500000]
+      ]), '余额表');
+    payload = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+    const f = el('file');
+    f.files = [{ name: '两表.xlsx' }];
+    fire('file', 'change');
+    await sleep(150);
+    ok(/余额表/.test(el('fileInfo').textContent), '选的是余额表不是流水表（实际：' + el('fileInfo').textContent + '）');
+    ok(/可函证户数[\s\S]{0,40}>2</.test(el('statBox').innerHTML) || />2</.test(el('statBox').innerHTML), '2 户，不是 30 户');
+  }
+
+  console.log('\n[裸「单位」表头能读]');
+  await loadFile([['单位', '期末余额'], ['华远科技有限公司', 1000000]], '往来');
+  eq(el('genControl').disabled, false, '「单位」这种表头也能用');
   console.log('\n' + '='.repeat(56));
   if (fail.length) {
     console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

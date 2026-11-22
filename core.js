@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.2';
+  var VERSION = '0.1.3';
 
   /* ---------------- 基础 ---------------- */
 
@@ -75,36 +75,33 @@
   // 「客户编码」「供应商编号」里也有「客户」「供应商」，不能当单位名称列
   var CODE_WORDS = /编码|编号|代码|账号|卡号|账户/;
   // 只认「借方余额」这类；「借方发生额」是本期发生数，不是余额
-  var DEBIT_WORDS = /借方余额|借方期末|期末借方/;
-  var CREDIT_WORDS = /贷方余额|贷方期末|期末贷方/;
-  // 「单位：元」这种是计量单位标注，不是列名
-  var UNIT_LABEL = /^(单位|金额单位|人民币|元|万元|单位元|金额单位元|单位人民币元)$/;
+  var DEBIT_WORDS = /借方余额|期末余额借方|期末借方|借方期末/;
+  var CREDIT_WORDS = /贷方余额|期末余额贷方|期末贷方|贷方期末/;
+  // 只有带币种字样的才是计量单位标注（「单位：元」「金额单位：元」）；
+  // 光写「单位」是列名，不能当标注跳过
+  var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
   function isTotalName(name) {
     var n = norm(name);
     if (!n) return false;
-    // 「合计（人民币）」「本期合计」「合  计」都要认，但不能把「合计贸易有限公司」当合计行
-    var core = '合计|总计|小计|共计';
-    var prefix = new RegExp('^(' + core + ')');
-    var m = prefix.exec(n);
-    if (m) {
-      var rest = n.slice(m[0].length);
-      if (!rest) return true;
-      return /^(人民币|元|金额|本页|本表|本期|本季|本年|累计|以上|以下|及|数|额){1,3}$/.test(rest) && rest.length <= 6;
-    }
-    var suffix = new RegExp('^(本页|本表|本期|本季|本年|累计|以上)(' + core + ')(数|额)?$');
-    if (suffix.test(n)) return true;
-    // 「累计」「总额」「合计数」这类简写
-    return /^(累计|总?计|合计数|总额|本年累计|本期累计|累计数)$/.test(n);
+    // 去掉币种尾巴：「合计（元）」「累计人民币」
+    n = n.replace(/(人民币|万元|元)$/, '');
+    if (!n) return false;
+    var CORE = '合计|总计|小计|共计|总额|合计数|累计';
+    if (new RegExp('^(?:' + CORE + ')$').test(n)) return true;
+    // 「本年累计」「本期合计」「本年度合计」「上期合计」这类带期间前缀的
+    if (new RegExp('^(?:本年度|本年|本期|本月|本季|上期|上年|本页|本表|以上)*(?:' + CORE + ')$').test(n)) return true;
+    // 「合计数」「合计额」
+    if (new RegExp('^(?:合计|总计|小计|共计)(?:数|额)$').test(n)) return true;
+    return false;
   }
-
   /**
    * 一行能当表头吗？名称列和金额列必须是两列。
    * 标题行「往来单位期末余额表」里「单位」和「余额」在同一格，
    * 不这样排除就会把标题当表头，然后整张表读不出。
    */
   function analyzeRow(row) {
-    var nameCols = [], amountCols = [], subjectCols = [], codeCols = [];
+    var nameCols = [], amountCols = [], subjectCols = [], codeCols = [], nameRank = {};
     var debitCols = [], creditCols = [];
     (row || []).forEach(function (cell, c) {
       var t = norm(cell);
@@ -116,7 +113,13 @@
       if (isDebit) { debitCols.push(c); return; }
       if (isCredit) { creditCols.push(c); return; }
       if (isCode) { codeCols.push(c); return; }
-      if (NAME_WORDS.test(t)) { nameCols.push(c); return; }
+      if (NAME_WORDS.test(t)) {
+        nameCols.push(c);
+        // 记下优先级：「客户名称」比「科目名称」更像函证对象
+        (nameRank[c] = /单位名称|客户名称|供应商名称|往来单位|客户全称/.test(t) ? 3
+          : (/科目名称|项目名称/.test(t) ? 1 : 2));
+        return;
+      }
       if (AMOUNT_WORDS.test(t)) { amountCols.push(c); return; }
       if (SUBJECT_WORDS.test(t)) subjectCols.push(c);
     });
@@ -124,12 +127,14 @@
     var hasBoth = debitCols.length > 0 && creditCols.length > 0;
     // 只有一列「借方余额」也照样能读：借方为正
     var hasOneSide = !hasBoth && (debitCols.length > 0 || creditCols.length > 0);
-    if (hasOneSide) amountCols = amountCols.concat(debitCols, creditCols);
+    // 只有一列时：借方余额当正数用；贷方余额要记成负数，单独走 creditOnly 分支
+    if (hasOneSide && debitCols.length) amountCols = amountCols.concat(debitCols);
+    if (hasOneSide && creditCols.length) amountCols = amountCols.concat(creditCols);
     var score = nameCols.length * 3 + (hasBoth ? 3 : amountCols.length * 2) +
       subjectCols.length + (codeCols.length ? 1 : 0);
     if (!nameCols.length || (!amountCols.length && !hasBoth)) score = 0;
     return {
-      score: score, nameCols: nameCols, amountCols: amountCols,
+      score: score, nameCols: nameCols, amountCols: amountCols, nameRank: nameRank,
       subjectCols: subjectCols, codeCols: codeCols,
       debitCols: debitCols, creditCols: creditCols, hasBoth: hasBoth
     };
@@ -153,7 +158,10 @@
     }
 
     var a2 = best.a;
-    var nameCol = a2.nameCols[0];
+    // 同一行既有「科目名称」又有「客户名称」时，函证对象是后者
+    var nameCol = a2.nameCols.slice().sort(function (x, y) {
+      return (a2.nameRank[y] || 0) - (a2.nameRank[x] || 0) || x - y;
+    })[0];
     var amountCol = -1, amountRank = -1, debitCol = -1, creditCol = -1, dirCol = -1;
     var row = rows[best.rowIndex] || [];
 
@@ -174,6 +182,12 @@
       if (/^(方向|借贷方向|余额方向)$/.test(norm(row[c2]))) { dirCol = c2; break; }
     }
 
+    // 只有「贷方余额」一列：记成负数，不能当正数
+    if (creditCol < 0 && debitCol < 0 && a2.creditCols.length && !a2.debitCols.length) {
+      creditCol = a2.creditCols[0];
+      amountCol = -1;
+    }
+
     var problems = [];
     if (debitCol < 0 && creditCol < 0 && amountCol < 0) problems.push('没找到余额或金额列');
     if (amountCol >= 0 && /发生额/.test(norm(row[amountCol]))) {
@@ -190,8 +204,13 @@
 
     // 表头里写的是「科目名称」而不是单位/客户：这是科目余额表，不是往来明细
     var nameHead = norm(row[nameCol]);
-    var subjectLike = /科目名称|科目|项目名称/.test(nameHead) && !/单位|客户|供应商|户名|往来/.test(nameHead);
-    if (subjectLike && a2.codeCols.length) {
+    var codeHead = a2.codeCols.length ? norm(row[a2.codeCols[0]]) : '';
+    var nameIsCounterparty = /单位|客户|供应商|户名|往来/.test(nameHead);
+    // 「科目编码 + 名称/科目名称」= 科目余额表；
+    // 但只要名称列明确是客户/单位，就是带辅助核算的往来表，能用
+    var subjectLike = !nameIsCounterparty &&
+      (/科目名称|项目名称|^科目$/.test(nameHead) || (/科目|项目/.test(codeHead) && nameHead === '名称'));
+    if (subjectLike) {
       problems.push('这张表看起来是科目余额表（科目编码 + 科目名称），不是往来单位明细');
     }
 
@@ -200,7 +219,10 @@
       subjectCol: a2.subjectCols.length ? a2.subjectCols[0] : -1,
       codeCol: a2.codeCols.length ? a2.codeCols[0] : -1,
       debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
-      usable: nameCol >= 0 && (amountCol >= 0 || debitCol >= 0) && !subjectLike,
+      usable: nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) && !subjectLike,
+      amountKind: (debitCol >= 0 || creditCol >= 0) ? '余额'
+        : (amountCol >= 0 ? (/期末余额|期末数/.test(norm(row[amountCol])) ? '余额'
+          : (/余额/.test(norm(row[amountCol])) ? '余额' : '发生额')) : ''),
       problems: problems
     };
   }
@@ -216,8 +238,9 @@
     var problems = (header.problems || []).slice();
 
     var useDebitCredit = header.debitCol >= 0 && header.creditCol >= 0;
+    var creditOnlyGuard = header.creditCol >= 0 && header.debitCol < 0;
     if (header.rowIndex < 0 || header.nameCol < 0 ||
-        (!useDebitCredit && header.amountCol < 0)) {
+        (!useDebitCredit && !creditOnlyGuard && header.amountCol < 0)) {
       return { entities: [], skipped: [], problems: problems };
     }
 
@@ -228,21 +251,40 @@
       var subject = header.subjectCol >= 0 ? str(row[header.subjectCol]).trim() : '';
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
 
-      var cents = null, rawAmount = '', how = '';
+      var cents = null, rawAmount = '', how = '', unreadable = '';
+      var creditOnly = header.creditCol >= 0 && header.debitCol < 0;
+
       if (useDebitCredit) {
-        var d = toCents(row[header.debitCol]);
-        var cr = toCents(row[header.creditCol]);
-        if (d === null && cr === null) cents = null;
+        var dRaw = row[header.debitCol], cRaw = row[header.creditCol];
+        var d = toCents(dRaw), cr = toCents(cRaw);
+        // 一格有内容却读不出（「待核实」「#REF!」）不能当 0：
+        // 借 1,000 / 贷「待核实」被算成净 1,000，错得毫无提示
+        if (str(dRaw).trim() !== '' && d === null) unreadable = '借方';
+        else if (str(cRaw).trim() !== '' && cr === null) unreadable = '贷方';
+        if (unreadable) cents = null;
+        else if (d === null && cr === null) cents = null;
         else cents = (d || 0) - (cr || 0);
-        rawAmount = str(row[header.debitCol]) + '/' + str(row[header.creditCol]);
+        rawAmount = str(dRaw) + '/' + str(cRaw);
         how = '借−贷';
+      } else if (creditOnly) {
+        rawAmount = row[header.creditCol];
+        cents = toCents(rawAmount);
+        // 只有「贷方余额」一列时，贷方余额是负数，不能当正数
+        if (cents !== null) cents = -cents;
+        how = '贷方余额';
       } else {
         rawAmount = row[header.amountCol];
         cents = toCents(rawAmount);
       }
 
-      // 方向列：写「贷」的当负数（往来表里预收/应付常见）
-      if (cents !== null && header.dirCol >= 0) {
+      if (unreadable) {
+        skipped.push({ srcRow: excelRow, reason: '金额读不出', name: name || '', raw: unreadable + '列：' + rawAmount });
+        continue;
+      }
+
+      // 方向列：写「贷」的当负数（往来表里预收/应付常见）。
+      // 借贷两列本身已经带符号，再按方向取反会翻两次。
+      if (cents !== null && header.dirCol >= 0 && !useDebitCredit && !creditOnly) {
         var dir = norm(row[header.dirCol]);
         if (/^贷/.test(dir) && cents > 0) cents = -cents;
         else if (/^借/.test(dir) && cents < 0) cents = -cents;
@@ -443,7 +485,7 @@
     var notes = opts.notes || [];
     if (notes.length) {
       head.push([]);
-      head.push(['读取情况（这些行没有参与函证，请回原表核对）']);
+      head.push(['读取情况（下面这些提示请逐条核对，涉及金额的已跳过、未参与函证）']);
       notes.forEach(function (n) { head.push([n]); });
     }
     var excl = opts.excludedNames || [];

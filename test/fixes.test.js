@@ -180,6 +180,57 @@ ok(!zeroSample.selected.some(s => s.name === 'A'), '0 元户不进纯随机');
 console.log('\n[第二轮 9 方向列与借贷两列不能双重取反]');
 const h91 = Core.detectHeader([['客户名称', '方向', '借方余额', '贷方余额'], ['甲', '贷', 1000, 0]]);
 ok(h91.problems.some(p => /方向列不再重复取反/.test(p)), '同时有两列时要提示');
+
+console.log('\n[第三轮 N1 期末余额借方/贷方两列]');
+const n1 = Core.parseRows([
+  ['客户名称', '期末余额借方', '期末余额贷方'],
+  ['甲', '-', '1,000.00'],
+  ['乙', '800.00', '-']
+], Core.detectHeader([
+  ['客户名称', '期末余额借方', '期末余额贷方'],
+  ['甲', '-', '1,000.00'],
+  ['乙', '800.00', '-']
+]), {});
+eq(n1.entities.filter(e => e.name === '甲')[0].cents, -100000, '贷方那格是负数，不是 0');
+eq(n1.entities.filter(e => e.name === '乙')[0].cents, 80000, '借方那格是正数');
+
+console.log('\n[第三轮 N3 裸「单位」是列名]');
+const n3 = Core.detectHeader([['单位', '期末余额'], ['华远', 1000]]);
+eq(n3.rowIndex, 0, '裸「单位」能当表头');
+eq(n3.usable, true, '能用');
+const n3b = Core.detectHeader([['往来表', '', '', '单位：元'], ['单位名称', '期末余额'], ['甲', 1]]);
+eq(n3b.rowIndex, 1, '「单位：元」仍然跳过');
+
+console.log('\n[第三轮 N4 辅助核算余额表不能误拒]');
+const n4 = Core.detectHeader([['科目编码', '科目名称', '客户名称', '期末余额'], ['1002', '银行存款', '华远', 1000]]);
+eq(n4.usable, true, '带客户名称的辅助核算表能用');
+eq(n4.nameCol, 2, '名称列取「客户名称」不是「科目名称」');
+
+console.log('\n[第三轮 N6 科目余额表变体]');
+const n6 = Core.detectHeader([['科目编码', '名称', '期末余额'], ['1002', '银行存款', 1000]]);
+eq(n6.usable, false, '科目编码 + 名称 也要认成科目表');
+
+console.log('\n[第三轮 N5 借贷一格读不出不能当 0]');
+const n5rows = [['客户名称', '借方余额', '贷方余额'], ['甲', '待核实', 5000]];
+const n5 = Core.parseRows(n5rows, Core.detectHeader(n5rows), { firstExcelRow: 1 });
+eq(n5.entities.length, 0, '这一行不能算成 −5,000');
+ok(n5.skipped.some(s => s.reason === '金额读不出'), '要报出来');
+
+console.log('\n[第三轮 N8 单侧贷方余额记负数]');
+const n8rows = [['客户名称', '贷方余额'], ['甲', 8000]];
+const n8 = Core.parseRows(n8rows, Core.detectHeader(n8rows), {});
+eq(n8.entities[0].cents, -800000, '贷方余额是负数');
+const n8b = Core.parseRows([['客户名称', '借方余额'], ['甲', 8000]], Core.detectHeader([['客户名称', '借方余额'], ['甲', 8000]]), {});
+eq(n8b.entities[0].cents, 800000, '借方余额是正数');
+
+console.log('\n[第三轮 N9 合计写法（带元/期间前缀）]');
+['累计（元）', '总额（元）', '本月合计', '本年度合计', '上期合计', '以上合计'].forEach(function (n) {
+  ok(Core.isTotalName(n), '「' + n + '」要认');
+});
+
+console.log('\n[第三轮 N7 发生额要提示]');
+const n7 = Core.detectHeader([['客户名称', '借方发生额', '贷方发生额'], ['甲', 1000, 200]]);
+ok(n7.problems.some(p => /发生额/.test(p)), '用了发生额要明说');
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
