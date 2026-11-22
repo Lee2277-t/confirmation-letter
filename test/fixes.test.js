@@ -427,7 +427,8 @@ eq(g3.usable, false, '真的多列科目余额仍然要拒');
 
 console.log('\n[第八轮 5 科目留空要记「未填科目」，不能顶上一行的科目]');
 const e5rows = [['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000000], ['', '预收账款', -300000], ['', '', 200000]];
-const e5parse = Core.parseRows(e5rows, Core.detectHeader(e5rows), {});
+const e5merges = [{ s: { r: 1, c: 0 }, e: { r: 3, c: 0 } }];
+const e5parse = Core.parseRows(e5rows, Core.detectHeader(e5rows), { merges: e5merges });
 const e5m = Core.mergeByName(e5parse.entities);
 eq(e5m[0].cents, 90000000, '合计 900,000 不变');
 eq(e5m[0].noSubjectCents, 20000000, '200,000 记到「未填科目」，不顶预收账款');
@@ -479,7 +480,7 @@ eq(r9b4.skipped.filter(x => x.reason === '金额读不出').length, 0, '空行�
 
 console.log('\n[第九轮 5 控制表科目列要写「未填科目」]');
 const r9e5rows = [['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000000], ['', '预收账款', -300000], ['', '', 200000]];
-const r9e5res = Core.selectEntities(Core.mergeByName(Core.parseRows(r9e5rows, Core.detectHeader(r9e5rows), {}).entities), { mode: 'all' });
+const r9e5res = Core.selectEntities(Core.mergeByName(Core.parseRows(r9e5rows, Core.detectHeader(r9e5rows), { merges: e5merges }).entities), { mode: 'all' });
 const r9e5ctl = Core.controlRows(r9e5res, {});
 const r9e5row = r9e5ctl.filter(r => r && r[1] === '华远')[0];
 ok(r9e5row && /未填科目/.test(String(r9e5row[2])), '控制表科目要包含「未填科目」（实际：' + (r9e5row ? r9e5row[2] : '无') + '）');
@@ -599,11 +600,214 @@ eq(Core.detectHeader([['客户名称', '最后交易日期', '余额'], ['华远
 eq(Core.detectHeader([['客户名称', '摘要', '余额'], ['华远', '收款', 1000], ['华远', '收款', 1500]]).usable, false,
   '同一户多行才是台账');
 
-console.log('\n' + '='.repeat(56));
-if (fail.length) {
-  console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
-  fail.forEach((m, i) => console.log('  ' + (i + 1) + '. ' + m));
-  process.exitCode = 1;
-} else {
-  console.log('第一轮修复回归全部通过：' + pass + ' 项断言');
+console.log('\n[第十三轮 XLSX 实表导入与导出]');
+const fs = require('fs');
+const vm = require('vm');
+const XLSX = require('../vendor/xlsx.full.min.js');
+const elements = {};
+function element(id) {
+  if (!elements[id]) elements[id] = {
+    value: '', innerHTML: '', textContent: '', disabled: false, events: {},
+    classList: { add() {}, remove() {} }, querySelectorAll() { return []; },
+    addEventListener(type, fn) { this.events[type] = fn; }
+  };
+  return elements[id];
 }
+function fire(id, type) {
+  const el = element(id);
+  el.events[type]({ target: el });
+}
+let payload, control;
+function FileReader() {}
+FileReader.prototype.readAsArrayBuffer = function () {
+  this.result = payload;
+  this.onload();
+};
+const spreadsheet = Object.assign({}, XLSX, { writeFile(wb) { control = wb; } });
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8'), {
+  window: { Core: Core, XLSX: spreadsheet }, document: { getElementById: element }, FileReader: FileReader
+});
+
+function workbookData(sheets) {
+  const wb = XLSX.utils.book_new();
+  sheets.forEach(function (sheet) {
+    const ws = XLSX.utils.aoa_to_sheet(sheet[1], { origin: sheet[3] || 'A1' });
+    if (sheet[2]) ws['!merges'] = sheet[2].map(XLSX.utils.decode_range);
+    XLSX.utils.book_append_sheet(wb, ws, sheet[0]);
+  });
+  return XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+}
+
+async function loadWorkbook(sheets) {
+  payload = workbookData(sheets);
+  element('selMode').value = 'all';
+  element('file').files = [{ name: '合成往来测试.xlsx' }];
+  fire('file', 'change');
+  await new Promise(setImmediate);
+}
+
+function exportedBalances() {
+  control = null;
+  element('clientName').value = '测试制造有限公司';
+  element('cutOff').value = '2026-06-30';
+  if (!element('genControl').disabled) fire('genControl', 'click');
+  if (!control) return '';
+  const ws = control.Sheets[control.SheetNames[0]];
+  return JSON.stringify(XLSX.utils.sheet_to_json(ws, { header: 1 })
+    .filter(function (row) { return typeof row[0] === 'number'; })
+    .map(function (row) { return row.slice(1, 4); }));
+}
+
+async function workbookRegressions() {
+  const simple = [['单位名称', '期末余额'], ['远峰科技有限公司', 300]];
+  const ambiguous = [['单位名称', '科目', '期末余额'],
+    ['远峰科技有限公司', '应收账款', 300], [null, null, 300], ['海岚科技有限公司', '应收账款', 200]];
+  await loadWorkbook([['往来余额（万元）', simple]]);
+  ok(element('genLetter').disabled && /万元/.test(element('fileInfo').textContent), '仅工作表名写万元也要拒绝出函并说明单位');
+  await loadWorkbook([['待核对（万元）', simple.concat([['海岚科技有限公司', 500]])], ['可用余额', simple]]);
+  ok(/可用余额/.test(element('fileInfo').textContent) && /待核对（万元）（认不出）/.test(element('sheetSel').innerHTML), '自动选中元表，下拉列表标出万元表');
+  element('sheetSel').value = '待核对（万元）';
+  fire('sheetSel', 'change');
+  ok(element('genControl').disabled && /万元/.test(element('fileInfo').textContent), '手动切换万元表也要拒绝出表');
+  await loadWorkbook([['往来余额', [['单位名称', '期末余额', '备注'], ['远峰科技有限公司', 300, '合同上限10万元']]]]);
+  ok(element('genControl').disabled && /万元/.test(element('fileInfo').textContent), '保留普通单元格含万元的既有拒绝规则');
+
+  await loadWorkbook([['待核对', ambiguous], ['可用余额', simple]]);
+  ok(/可用余额/.test(element('fileInfo').textContent) && /待核对（认不出）/.test(element('sheetSel').innerHTML), '解析后有歧义的表不能抢占可用表');
+  element('sheetSel').value = '待核对';
+  fire('sheetSel', 'change');
+  ok(element('genControl').disabled && element('genLetter').disabled && /分不清/.test(element('fileInfo').textContent), '无合并的同额留空行必须阻止两种导出');
+  await loadWorkbook([['合并续行', ambiguous, ['B4:B5'], 'B3']]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款、未填科目', 600], ['海岚科技有限公司', '应收账款', 200]]), '偏移工作表里的同额合并续行也要计入未填科目');
+  await loadWorkbook([['合并续行', [['单位名称', '科目', '期末余额'], ['海岚科技有限公司', '应收账款', 200],
+    ['远峰科技有限公司', '应收账款', 300], [null, null, 500]], ['A3:A4']]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款、未填科目', 800], ['海岚科技有限公司', '应收账款', 200]]), '等于多行累计的真实合并续行仍要计入');
+  await loadWorkbook([['待核对', [['单位名称', '科目', '期末余额'], ['海岚科技有限公司', '应收账款', 200],
+    ['远峰科技有限公司', '应收账款', 300], [null, null, 500]]]]);
+  ok(element('genControl').disabled && /分不清/.test(element('fileInfo').textContent), '多行累计同额也不足以认定无标签的行是合计');
+
+  await loadWorkbook([['业务员分组', [['单位名称', '科目', '业务员', '期末余额'],
+    ['远峰科技有限公司', '应收账款', '张三', 300], [null, '其他应收款', '张三', 200], [null, null, '小计', 500],
+    ['海岚科技有限公司', '应收账款', '李四', 100], [null, null, '小计', 100]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款、其他应收款', 500], ['海岚科技有限公司', '应收账款', 100]]), '业务员列的小计不依赖整表累计，也不加到第二户');
+  await loadWorkbook([['科目分段', [['单位名称', '科目', '期末余额'],
+    ['远峰科技有限公司', '应收账款', 300], ['合计', null, 300], [null, '其他应收款', 200]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款、其他应收款', 500]]), '跳过合计标签后，不能把标签沿用成下一明细的户名');
+
+  await loadWorkbook([['按客户汇总', [['客户编码', '客户名称', '最后交易日期', '科目', '余额'],
+    ['KH001', '远峰科技有限公司', '2026-06-08', '应收账款', 300], ['KH001', '远峰科技有限公司', '2026-06-11', '其他应收款', 200]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款、其他应收款', 500]]), '最后交易日期是余额属性，同一客户分两科目仍可导出');
+  const sameName = [['客户编码', '客户名称', '最后交易日期', '余额'],
+    ['KH001', '远峰商行', '2026-06-08', 300], ['KH002', '远峰商行', '2026-06-11', 200]];
+  await loadWorkbook([['按客户汇总', sameName]]);
+  ok(element('genLetter').disabled && /同名|编码/.test(element('fileInfo').textContent), '同名异码应说明对象歧义，避免把两户做成一封函');
+  await loadWorkbook([['逐笔台账', [['日期', '凭证号', '客户名称', '摘要', '余额'],
+    ['2026-06-08', '记-018', '远峰科技有限公司', '收到货款', 300], ['2026-06-11', '记-023', '海岚科技有限公司', '收到货款', 200]]]]);
+  ok(element('genLetter').disabled && /台账/.test(element('fileInfo').textContent), '日期、凭证号和摘要齐全的逐笔台账，即使每户一笔也要拒绝');
+
+  await loadWorkbook([['期末余额', [['客户名称', '期末方向', '期末余额', '期末贷方余额'], ['远峰科技有限公司', '借', 300, 20]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '未填科目', 300]]), '完整期末余额优先于同期间的单边贷方');
+  await loadWorkbook([['期末余额', [['客户名称', '期初方向', '期初余额', '期末余额'], ['远峰科技有限公司', '贷', 50, 300]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '未填科目', 300]]), '期初方向不能改变期末余额的符号');
+  await loadWorkbook([['期末余额', [['客户名称', '余额方向', '借方余额'], ['远峰科技有限公司', '贷', 300]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '未填科目', 300]]), '单边借方余额也不受方向列影响');
+  await loadWorkbook([['期末余额', [['客户名称', '其他应收款期末余额', '期末金额'], ['远峰科技有限公司', 20, 300]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '未填科目', 300]]), '通用期末金额不能被单科目期末余额覆盖');
+  await loadWorkbook([['并列科目', [['客户名称', '应收账款期末借方余额', '应收账款期末贷方余额', '其他应收款期末借方余额', '其他应收款期末贷方余额'],
+    ['远峰科技有限公司', 300, 0, 50, 0]]]]);
+  ok(element('genLetter').disabled && /分不清/.test(element('fileInfo').textContent), '多科目借贷列并列要拒绝，不能取第一对');
+  await loadWorkbook([['并列科目', [['客户名称', '期初余额', '应收账款期末余额', '预收账款期末余额'], ['远峰科技有限公司', 100, 300, 200]]]]);
+  ok(element('genLetter').disabled && /分不清/.test(element('fileInfo').textContent), '通用期初余额不能掩盖多个期末科目余额');
+  await loadWorkbook([['并列科目', [['客户名称', '应收账款期末金额', '其他应收款期末金额'], ['远峰科技有限公司', 300, 20]]]]);
+  ok(element('genLetter').disabled && /分不清/.test(element('fileInfo').textContent), '用期末金额命名的并列科目也继续拒绝');
+  await loadWorkbook([['本月金额', [['单位名称', '本月金额'], ['远峰科技有限公司', 300]]]]);
+  ok(element('genLetter').disabled && /发生额/.test(element('fileInfo').textContent), '只有本月金额时不能当余额发函');
+
+  const codes = [['序号', '科目编码', '核算项目编码', '核算项目名称', '科目名称', '期末余额'], [1, '1122', 'KH001', '远峰科技有限公司', '应收账款', 300]];
+  const codeBook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(codeBook, XLSX.utils.aoa_to_sheet(codes), '客户编码');
+  const codeSheet = XLSX.read(XLSX.write(codeBook, { type: 'array', bookType: 'xlsx' }), { type: 'array' }).Sheets['客户编码'];
+  const back = XLSX.utils.sheet_to_json(codeSheet, { header: 1 });
+  const parsed = Core.parseRows(back, Core.detectHeader(back), {});
+  eq(parsed.entities[0] && parsed.entities[0].code, 'KH001', '科目编码排在前面也要取核算项目编码');
+  await loadWorkbook([['客户分类', [['序号', '客户类别', '客户编号', '客户', '科目', '期末余额'],
+    [1, '重点客户', 'KH001', '远峰科技有限公司', '应收账款', 300]]]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款', 300]]), '客户类别不能成为函证科目');
+
+  await loadWorkbook([['两级方向金额', [['序号', '科目名称', '客户名称', '期初余额', null, '期末余额', null],
+    [null, null, null, '方向', '金额', '方向', '金额'], [1, '应收账款', '远峰科技有限公司', '借', 50, '贷', 300]],
+  ['A1:A2', 'B1:B2', 'C1:C2', 'D1:E1', 'F1:G1']]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款', -300]]), '纵并名称和科目时按期末组的方向和金额出表');
+  await loadWorkbook([['名称科目在下层', [['基础资料', null, null, '期末余额', null],
+    ['客户编码', '客户名称', '科目名称', '借方', '贷方'], ['KH001', '远峰科技有限公司', '应收账款', 0, 300]], ['A1:C1', 'D1:E1']]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款', -300]]), '下层也能提供名称、编码和科目');
+  await loadWorkbook([['期末余额纵并', [['客户名称', '科目名称', '本期发生额', null, '期末余额'],
+    [null, null, '借方', '贷方', null], ['远峰科技有限公司', '应收账款', 50, 200, 300]], ['A1:A2', 'B1:B2', 'C1:D1', 'E1:E2']]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '应收账款', 300]]), '发生额分组旁边纵并的期末余额不能漏掉');
+  await loadWorkbook([['借贷余额', [['客户名称', '最后交易日期', '借贷余额', null],
+    [null, null, '借方', '贷方'], ['远峰科技有限公司', '2026-06-08', 0, 300]], ['A1:A2', 'B1:B2', 'C1:D1']]]);
+  eq(exportedBalances(), JSON.stringify([['远峰科技有限公司', '未填科目', -300]]), '借贷余额组带日期属性也应保留借贷净额');
+  await loadWorkbook([['金额跨科目合并', [['单位名称', '科目名称', '期末余额'],
+    ['远峰科技有限公司', '应收账款', 300], [null, '其他应收款', null]], ['A2:A3', 'C2:C3']]]);
+  ok(element('genLetter').disabled && /合并|科目/.test(element('fileInfo').textContent), '一个合并金额跨不同科目时不能都记到首科目');
+
+  console.log('\n[第二轮复核 F3/F4/F5 XLSX 反例]');
+  const ledger = [['客户名称', '摘要', '余额'], ['华远', '收款', 1000], [null, '收款', 1500], [null, '收款', 2000]];
+  const remark = [['备注', '客户名称', '期末余额'], ['价税合计', '华远', 1000], ['', '东方', 500]];
+  const missing = [['单位名称', '期末余额'], ['华远', 1000], ['东方', 500], [null, 1000]];
+  const wb = XLSX.read(workbookData([
+    ['合并台账', ledger, ['A2:A4']],
+    ['留空台账', ledger.slice(0, 3)],
+    ['单行余额', [ledger[0], ledger[1], [null, '合计', 1000]]],
+    ['首列备注', remark],
+    ['缺少名称', missing]
+  ]), { type: 'array' });
+
+  ['合并台账', '留空台账', '单行余额'].forEach(function (name) {
+    const sheet = wb.Sheets[name];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null });
+    const header = Core.detectHeader(rows, name, sheet['!merges']);
+    if (name === '单行余额') {
+      eq(header.usable, true, '摘要列的合计行不算第二笔台账');
+    } else {
+      eq(header.usable, false, name + '的空名称金额行也算同一户多笔');
+      ok(header.problems.some(p => /逐笔明细台账/.test(p)), name + '提示逐笔余额不能相加');
+    }
+  });
+
+  const remarkRows = XLSX.utils.sheet_to_json(wb.Sheets['首列备注'], { header: 1, defval: null });
+  const parsedRemark = Core.parseRows(remarkRows, Core.detectHeader(remarkRows), {});
+  eq(JSON.stringify(parsedRemark.entities.map(e => [e.name, e.cents])),
+    JSON.stringify([['华远', 100000], ['东方', 50000]]), 'F4 首列备注为价税合计时，两户金额均保留');
+  eq(parsedRemark.skipped.length, 0, 'F4 正常明细均未跳过');
+
+  await loadWorkbook([['首列序号', [['序号', '客户名称', '期末余额'],
+    [1, '华远', 1000], [2, '东方', 500], ['本页合计', null, 1500], [null, '总计', 1500]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000], ['东方', '未填科目', 500]]),
+    'F4 序号列和名称列的真实合计行都跳过');
+  ok(control && XLSX.utils.sheet_to_json(control.Sheets[control.SheetNames[0]], { header: 1 })
+    .some(row => row.includes('跳过 2 行合计行')), 'F4 控制表记录跳过的合计行总数');
+
+  const missingRows = XLSX.utils.sheet_to_json(wb.Sheets['缺少名称'], { header: 1, defval: null });
+  const missingHeader = Core.detectHeader(missingRows);
+  const parsedMissing = Core.parseRows(missingRows, missingHeader, {});
+  eq(missingHeader.usable, false, 'F5 无名称的金额对不上累计时，整表停止导出');
+  eq(JSON.stringify(Core.mergeByName(parsedMissing.entities).map(e => [e.name, e.cents])),
+    JSON.stringify([['华远', 100000], ['东方', 50000]]), 'F5 无法归属的 1,000 元没有并到东方');
+  ok(parsedMissing.problems.some(p => p.includes('第 4 行没有单位名称，金额也与上面的合计对不上')),
+    'F5 读取问题包含原表行号和金额不符原因');
+}
+
+workbookRegressions().then(function () {
+  console.log('\n' + '='.repeat(56));
+  if (fail.length) {
+    console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
+    fail.forEach((m, i) => console.log('  ' + (i + 1) + '. ' + m));
+    process.exitCode = 1;
+  } else {
+    console.log('第一轮修复回归全部通过：' + pass + ' 项断言');
+  }
+}).catch(function (error) {
+  console.error(error);
+  process.exitCode = 1;
+});

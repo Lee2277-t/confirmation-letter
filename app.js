@@ -9,9 +9,6 @@
     fileName: '',
     wb: null,
     sheetName: '',
-    origin: 0,
-    rows: [],
-    header: null,
     parsed: null,
     entities: [],
     selected: [],
@@ -34,8 +31,8 @@
   function sheetRows(wb, name) {
     var ws = wb.Sheets[name];
     if (!ws) return [];
-    // 合并单元格不在这里填：填了会把「金额」抄到每一行，同一笔钱被加好几遍。
-    // 名称列的空白由 parseRows 的「沿用上一个名称」处理，金额列一律不填。    // 错误值（#REF!）在 raw 模式下是 null，和空格子分不清，先换成文字
+    // 保留合并格的原值，避免把同一个金额抄到每一行。
+    // 错误值（#REF!）在 raw 模式下是 null，和空格子分不清，先换成文字。
     Object.keys(ws).forEach(function (addr) {
       if (addr.charAt(0) === '!') return;
       var cell = ws[addr];
@@ -47,10 +44,18 @@
     return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, blankrows: true });
   }
 
-  function sheetOrigin(wb, name) {
+  function inspectSheet(wb, name) {
     var ws = wb.Sheets[name];
-    if (!ws || !ws['!ref'] || !XLSX.utils.decode_range) return 0;
-    try { return XLSX.utils.decode_range(ws['!ref']).s.r; } catch (e) { return 0; }
+    var rows = sheetRows(wb, name);
+    var origin = ws && ws['!ref'] ? XLSX.utils.decode_range(ws['!ref']).s : { r: 0, c: 0 };
+    // sheet_to_json 从 !ref 左上角起算，合并范围还是 Excel 的绝对坐标。
+    var merges = ((ws && ws['!merges']) || []).map(function (m) {
+      return { s: { r: m.s.r - origin.r, c: m.s.c - origin.c }, e: { r: m.e.r - origin.r, c: m.e.c - origin.c } };
+    });
+    var header = Core.detectHeader(rows, name, merges);
+    // 读行才发现的歧义也要参加整表可用性判定。
+    var parsed = header.usable ? Core.parseRows(rows, header, { firstExcelRow: origin.r + 1, merges: merges }) : null;
+    return { name: name, rowCount: rows.length, header: header, parsed: parsed };
   }
 
   /**
@@ -59,16 +64,19 @@
    * 只按行数挑会把整批函做成用发生额出的。
    */
   function pickSheet(wb) {
-    var best = null;
+    var best = null, usable = [], why = '';
     wb.SheetNames.forEach(function (name) {
-      var rows = sheetRows(wb, name);
-      var h = Core.detectHeader(rows);
+      var sheet = inspectSheet(wb, name), h = sheet.header;
       if (h.rowIndex < 0) return;
-      if (h.usable === false) return;
-      var score = 100 + (h.amountKind === '余额' ? 30 : 0) + Math.min(rows.length, 2000) / 1000;
-      if (!best || score > best.score) best = { name: name, rows: rows, header: h, score: score };
+      if (!h.usable) {
+        if (!why) why = h.problems.join('；');
+        return;
+      }
+      usable.push(name);
+      sheet.score = 100 + (h.amountKind === '余额' ? 30 : 0) + Math.min(sheet.rowCount, 2000) / 1000;
+      if (!best || sheet.score > best.score) best = sheet;
     });
-    return best;
+    return { best: best, usable: usable, why: why };
   }
 
   /** CSV 可能是 GBK（Excel 另存的默认编码），先按 UTF-8 严解，失败再按 GBK */
@@ -110,8 +118,6 @@
     state.entities = [];
     state.selected = [];
     state.result = null;
-    state.header = null;
-    state.rows = [];
     $('fileInfo').textContent = msg || '';
     $('statBox').innerHTML = '';
     $('listBox').innerHTML = '';
@@ -121,26 +127,13 @@
     $('genInfo').textContent = '';
   }
 
-  function setWorkbook(res, pick) {
-    state.fileName = res.fileName;
-    state.wb = res.wb;
+  function setSheet(pick) {
     state.sheetName = pick.name;
-    state.rows = pick.rows;
-    state.header = pick.header;
-    state.origin = sheetOrigin(res.wb, pick.name);
+    state.parsed = pick.parsed;
+    state.entities = Core.mergeByName(state.parsed.entities);
     state.excluded = {};
     state.forced = {};
     state.lastError = '';
-  }
-
-  /* ---------------- 解析 ---------------- */
-
-  function parse() {
-    if (!state.header) { state.parsed = null; return; }
-    state.parsed = Core.parseRows(state.rows, state.header, {
-      firstExcelRow: (state.origin || 0) + 1
-    });
-    state.entities = Core.mergeByName(state.parsed.entities || []);
   }
 
   /** 门槛读不出来就明确报错——静默当 0 会变成「谁都不算大额」，底稿口径却是「≥0 全取」 */
@@ -346,14 +339,8 @@
   /* ---------------- 事件 ---------------- */
 
   /** 把工作簿里所有能用的表列出来，默认选评分最高的那张；返回提示文字 */
-  function fillSheetSelect(wb, picked) {
+  function fillSheetSelect(wb, picked, usable) {
     var sel = $('sheetSel');
-    var usable = [];
-    wb.SheetNames.forEach(function (name) {
-      var rows = sheetRows(wb, name);
-      var h = Core.detectHeader(rows);
-      if (h.rowIndex >= 0 && h.usable !== false) usable.push(name);
-    });
     sel.innerHTML = wb.SheetNames.map(function (n) {
       var label = n + (usable.indexOf(n) >= 0 ? '' : '（认不出）');
       return '<option value="' + n.replace(/"/g, '&quot;') + '"' +
@@ -369,19 +356,12 @@
   $('sheetSel').addEventListener('change', function () {
     if (!state.wb) return;
     var name = $('sheetSel').value;
-    var rows = sheetRows(state.wb, name);
-    var h = Core.detectHeader(rows);
-    if (h.rowIndex < 0 || h.usable === false) {
-      clearAll('这张表认不出：' + (h.problems[0] || '找不到表头'));
+    var sheet = inspectSheet(state.wb, name);
+    if (!sheet.header.usable) {
+      clearAll('这张表认不出：' + (sheet.header.problems.join('；') || '找不到表头'));
       return;
     }
-    state.sheetName = name;
-    state.rows = rows;
-    state.header = h;
-    state.origin = sheetOrigin(state.wb, name);
-    state.excluded = {};
-    state.forced = {};
-    parse();
+    setSheet(sheet);
     recompute();
     $('fileInfo').textContent = state.fileName + ' · ' + name;
   });
@@ -391,27 +371,20 @@
     if (!f) return;
     readWorkbook(f).then(function (res) {
       if (!res.ok) { clearAll('读不了这个文件：' + res.error); return; }
-      var pick = pickSheet(res.wb);
+      var sheets = pickSheet(res.wb), pick = sheets.best;
       if (!pick) {
-        // 能认出表头但不能用（比如是科目余额表）：把具体原因说出来，别只说「找不到」
-        var why = '';
-        res.wb.SheetNames.forEach(function (name) {
-          if (why) return;
-          var h = Core.detectHeader(sheetRows(res.wb, name));
-          if (h.rowIndex >= 0 && h.problems.length) why = h.problems.join('；');
-        });
-        clearAll(why || '这个文件里找不到「单位名称 + 余额」这样的表。函证对象要能认出单位名称和金额两列。');
+        clearAll(sheets.why || '这个文件里找不到「单位名称 + 余额」这样的表。函证对象要能认出单位名称和金额两列。');
         return;
       }
       // 换了一家客户，上一家的单位名和截止日不能留着，否则函会盖错名字
       $('clientName').value = '';
       $('cutOff').value = '';
+      state.fileName = res.fileName;
       state.wb = res.wb;
-      var sheetHint = fillSheetSelect(res.wb, pick.name);
-      setWorkbook(res, pick);
+      var sheetHint = fillSheetSelect(res.wb, pick.name, sheets.usable);
+      setSheet(pick);
       $('fileInfo').textContent = res.fileName + ' · ' + pick.name + sheetHint;
       $('listPanel').classList.remove('hidden');
-      parse();
       recompute();
     });
   });
@@ -440,15 +413,13 @@
     ];
     state.fileName = '示例-往来余额表';
     state.sheetName = '往来余额';
-    state.rows = rows;
-    state.origin = 0;
-    state.header = Core.detectHeader(rows);
     state.wb = null;
     state.excluded = {};
     $('fileInfo').textContent = '示例数据（虚构）';
     $('clientName').value = '示例被审计单位';
     $('cutOff').value = '2026-06-30';
-    parse();
+    state.parsed = Core.parseRows(rows, Core.detectHeader(rows), {});
+    state.entities = Core.mergeByName(state.parsed.entities);
     recompute();
   });
 

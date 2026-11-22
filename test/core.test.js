@@ -93,7 +93,9 @@ const rows6 = [
   ['甲公司', 100],
   ['', 500]
 ];
-const p6 = Core.parseRows(rows6, Core.detectHeader(rows6), { firstExcelRow: 1 });
+const p6 = Core.parseRows(rows6, Core.detectHeader(rows6), {
+  firstExcelRow: 1, merges: [{ s: { r: 1, c: 0 }, e: { r: 2, c: 0 } }]
+});
 // 名称列按区块合并时，下面几行是空的；沿用上一个名称，钱不能丢
 eq(p6.entities.length, 2, '空名称的行沿用了上一行的单位');
 eq(Core.mergeByName(p6.entities)[0].cents, 60000, '甲公司合计 600（100 + 500）');

@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.3.0';
+  var VERSION = '0.3.1';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,17 +81,16 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
-  /** 标签列里写着合计/小计，就把这行当合计行。
-   *  只看名称/科目/编码/方向/首列——备注、摘要这些自由文本里出现
-   *  「价税合计」「合同合计」很常见，扫整行会把一整户静默丢掉。 */
-  function isTotalRow(row, cols) {
-    var idx = (cols && cols.length) ? cols : [0];
-    for (var i = 0; i < idx.length; i++) {
-      if (idx[i] < 0) continue;
-      var s = str((row || [])[idx[i]]);
+  /** 只有标签列允许带前缀的合计；无明细的行可在其余附属列识别独立合计标签。 */
+  function isTotalRow(row, labelCols, hasDetails) {
+    for (var i = 0; i < labelCols.length; i++) {
+      if (labelCols[i] < 0) continue;
+      var s = str(row[labelCols[i]]);
       if (s && isTotalName(s)) return true;
     }
-    return false;
+    return !hasDetails && row.some(function (cell, col) {
+      return col > 0 && /^(本页|本表|以上)?(合计|小计|总计|共计)$/.test(norm(str(cell).replace(/[（(][^）)]*[）)]/g, '')));
+    });
   }
 
   function isTotalName(name) {
@@ -130,7 +129,7 @@
   var DIR_WORDS = /方向/;                       // 余额方向 / 借贷方向：是标识，不是金额
   var OPEN_WORDS = /期初|年初|上期|上月|上年年末/;  // 期初口径
   var CLOSE_WORDS = /期末|年末|本期期末/;          // 期末口径
-  var PERIOD_WORDS = /本期|本年|累计/;             // 期间发生额
+  var PERIOD_WORDS = /本期|本月|本年|本季|累计/;     // 期间发生额
   // 只认真正标识「一笔交易」的列；「业务员」「业务类型」是人员/属性列，不是流水标志
   var FLOW_WORDS = /日期|凭证|摘要|单号|票号/;
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
@@ -143,6 +142,7 @@
     var t = norm(cell);
     if (!t) return null;
     if (UNIT_LABEL.test(t)) return { role: 'unit' };
+    if (/^(最后|最近)(交易|业务|发生|往来)日期$/.test(t)) return { role: 'other' };
     if (FLOW_WORDS.test(t)) return { role: 'flow' };
     if (DIR_WORDS.test(t)) return { role: 'dir' };
     // 金蝶把往来单位叫「核算项目」，它就是函证对象；
@@ -153,6 +153,7 @@
       return { role: 'name', rank: 2 };
     }
     if (CODE_WORDS.test(t)) return { role: 'code' };
+    if (/^(单位|客户|供应商|往来单位)(类别|类型|分类)$/.test(t)) return { role: 'other' };
     // 「科目名称」两重身份：既是科目，也可能是这张表里唯一的名字列（科目余额表）
     if (SUBJECT_WORDS.test(t)) {
       return /名称$/.test(t) ? { role: 'name', rank: 1, subject: true } : { role: 'subject' };
@@ -192,7 +193,7 @@
         if (r.subject) cols.subject.push(c);
       }
       else if (r.role === 'amount') {
-        cols.amount.push({ c: c, side: r.side, period: r.period, kind: r.kind, balWord: r.balWord });
+        cols.amount.push({ c: c, side: r.side, period: r.period, kind: r.kind, balWord: r.balWord, head: norm(cell) });
       }
       else if (r.role === 'subject') cols.subject.push(c);
       else if (r.role === 'code') cols.code.push(c);
@@ -214,7 +215,7 @@
    * 两级表头：上一行是「期初余额 / 期末余额」这种分组，下一行是「借方 / 贷方」。
    * 合成 span=2，每个金额列的期间取自上一行、借贷方向取自下一行。
    */
-  function analyzeTwoLevel(topRow, subRow) {
+  function analyzeTwoLevel(topRow, subRow, merges, rowIndex) {
     // 标题行 vs 两级表头：真正的两级表头里，名称列只在上一行出现一次；
     // 标题行则会在下一行再出现一个名称列（同一列）
     var nameRepeat = false;
@@ -226,49 +227,39 @@
     });
     if (nameRepeat) return { score: 0, cols: null };
 
-    var groups = [], lastGroup = '';
-    (topRow || []).forEach(function (cell) {
-      var t = norm(cell);
-      if (t) {
-        if (OPEN_WORDS.test(t)) lastGroup = 'open';
-        else if (CLOSE_WORDS.test(t)) lastGroup = 'close';
-        else if (PERIOD_WORDS.test(t)) lastGroup = 'period';
-        else if (AMOUNT_WORDS.test(t)) lastGroup = lastGroup || '';
+    var groups = [];
+    (merges || []).forEach(function (m) {
+      if (m.s.r !== rowIndex || m.e.r !== rowIndex || m.s.c === m.e.c) return;
+      for (var c = m.s.c; c <= m.e.c; c++) groups[c] = norm(topRow[m.s.c]);
+    });
+    var heads = [], grouped = 0, last = '', lastMerged = false;
+    for (var c = 0; c < Math.max(topRow.length, subRow.length); c++) {
+      var top = norm(topRow[c]), sub = norm(subRow[c]);
+      if (top) { last = top; lastMerged = !!groups[c]; }
+      // 有合并范围时不越过边界；没标范围的分组沿用左边的标题。
+      var group = groups[c] || (lastMerged ? '' : last);
+      var parent = roleOf(group);
+      if (/^(借方|贷方)(金额|余额|发生额)?$|^(金额|余额|方向|余额方向)$/.test(sub) &&
+          parent && parent.role === 'amount' && !parent.side) {
+        grouped++;
+        if (/^(借方|贷方)/.test(sub)) heads[c] = group + sub.slice(0, 2) + (/发生额$/.test(sub) ? '发生额' : '');
+        else if (/方向$/.test(sub)) heads[c] = group + '方向';
+        else heads[c] = group;
+      } else {
+        heads[c] = sub || top;
       }
-      groups.push(lastGroup);
-    });
-    var cols = { name: [], amount: [], subject: [], code: [], dir: [], flow: [] };
-    (topRow || []).forEach(function (cell, c) {
-      var r = roleOf(cell);
-      if (!r) return;
-      if (r.role === 'name') cols.name.push({ c: c, rank: r.rank });
-      else if (r.role === 'subject') cols.subject.push(c);
-      else if (r.role === 'code') cols.code.push(c);
-      else if (r.role === 'dir') cols.dir.push(c);
-      else if (r.role === 'flow') cols.flow.push(c);
-    });
-    (subRow || []).forEach(function (cell, c) {
-      var t = norm(cell);
-      if (!t) return;
-      var side = /借方/.test(t) ? 'D' : (/贷方/.test(t) ? 'C' : '');
-      if (!side) {
-        // 下一行也可能直接写「期末余额」这种单层列
-        var r2 = roleOf(cell);
-        if (r2 && r2.role === 'amount') {
-          cols.amount.push({ c: c, side: r2.side, period: groups[c] || r2.period, kind: r2.kind });
-        }
-        return;
-      }
-      var g = groups[c] || '';
-      cols.amount.push({ c: c, side: side, period: g, kind: g === 'period' ? 'flow' : 'balance' });
-    });
-    var score = 0;
-    // 必须真的分了组：下一行至少两列带借贷方向
-    var sided = cols.amount.filter(function (a) { return !!a.side; }).length;
-    if (cols.name.length && cols.amount.length && sided >= 2) {
-      score = cols.name.length * 3 + Math.min(cols.amount.length, 6) * 2 + cols.subject.length + 3;
     }
-    return { score: score, cols: cols };
+    if (grouped < 2) return { score: 0, cols: null };
+    var result = analyzeRow(heads);
+    if (result.score) result.score += 3;
+    result.heads = heads;
+    return result;
+  }
+
+  var PERIOD_ONLY = /^(期初余额|年初余额|期初金额|期初|年初|期末余额|年末余额|年末|余额|期末数|期末金额|金额|期末)$/;
+
+  function amountScope(head) {
+    return head.replace(/期初|年初|期末|年末|借方|贷方|余额|金额|人民币|本位币|本币|元$/g, '');
   }
 
   /** 从金额列里挑出要用的那一组：期末 > 未标 > 期间 > 期初 */
@@ -289,9 +280,22 @@
     });
     if (!best) return null;
     var period = best.a.period;
-    // 同一期间里，借贷两列配对成净额；只有一列就按单边处理
-    var D = cols.filter(function (a) { return a.period === period && a.side === 'D'; })[0];
-    var C = cols.filter(function (a) { return a.period === period && a.side === 'C'; })[0];
+    var candidates = cols.filter(function (a) { return a.period === period; });
+    var generic = candidates.filter(function (a) {
+      return !a.side && PERIOD_ONLY.test(a.head.replace(/(人民币|元)+$/, ''));
+    });
+    var net = generic.filter(function (a) { return a.balWord; });
+    if (!net.length && period === 'close') net = generic;
+    // 明示的整列余额优先；其余只有唯一口径时才读，不能把不同科目的借贷列配成一对。
+    if (net.length === 1) return { debitCol: -1, creditCol: -1, amountCol: net[0].c, period: period };
+    var debits = candidates.filter(function (a) { return a.side === 'D'; });
+    var credits = candidates.filter(function (a) { return a.side === 'C'; });
+    var D = debits[0], C = credits[0];
+    var singles = candidates.filter(function (a) { return !a.side && (a.balWord || (!D && !C)); });
+    if (debits.length > 1 || credits.length > 1 || singles.length > 1 ||
+        (singles.length && (D || C)) || (D && C && amountScope(D.head) !== amountScope(C.head))) {
+      return { wide: true };
+    }
     if (D && C) return { debitCol: D.c, creditCol: C.c, amountCol: -1, period: period };
     if (D) return { debitCol: -1, creditCol: -1, amountCol: D.c, period: period, positive: true };
     if (C) return { debitCol: -1, creditCol: C.c, amountCol: -1, period: period };
@@ -302,7 +306,7 @@
   /**
    * 找表头。返回各列位置 + usable（能不能用来发函）+ problems（提示，不影响 usable）。
    */
-  function detectHeader(rows, sheetName) {
+  function detectHeader(rows, sheetName, merges) {
     var limit = Math.min(rows.length, 20);
     var best = { rowIndex: -1, score: 0 };
 
@@ -310,7 +314,7 @@
       var one = analyzeRow(rows[r]);
       if (one.score > best.score) best = { rowIndex: r, score: one.score, span: 1, a: one };
       if (r + 1 < limit) {
-        var two = analyzeTwoLevel(rows[r], rows[r + 1]);
+        var two = analyzeTwoLevel(rows[r] || [], rows[r + 1] || [], merges, r);
         if (two.score > best.score) best = { rowIndex: r, score: two.score, span: 2, a: two };
       }
     }
@@ -324,6 +328,7 @@
     }
 
     var a = best.a, cols = a.cols;
+    var heads = a.heads || rows[best.rowIndex];
     var problems = [];
     var span = best.span;
 
@@ -356,14 +361,36 @@
     var nameCol = cols.name.slice().sort(function (x, y) {
       return y.rank - x.rank || x.c - y.c;
     })[0].c;
-    var nameHead = norm((rows[best.rowIndex] || [])[nameCol]);
+    var nameHead = norm(heads[nameCol]);
     var nameIsCounterparty = /单位|客户|供应商|户名|往来|核算项目/.test(nameHead);
+    var partyCodeCol = cols.code.filter(function (c) {
+      return /^(往来单位|客户|供应商|单位|核算项目|辅助核算)(编码|编号|代码)$/.test(norm(heads[c]));
+    })[0];
 
     var picked = pickAmount(cols.amount);
     var flowOnly = !!(picked && picked.flowOnly);
-    var amountCol = picked && !flowOnly ? picked.amountCol : -1;
-    var debitCol = picked && !flowOnly ? picked.debitCol : -1;
-    var creditCol = picked && !flowOnly ? picked.creditCol : -1;
+    var isWide = !!(picked && picked.wide);
+    var amountCol = picked && !flowOnly && !isWide ? picked.amountCol : -1;
+    var debitCol = picked && !flowOnly && !isWide ? picked.debitCol : -1;
+    var creditCol = picked && !flowOnly && !isWide ? picked.creditCol : -1;
+    var subjectCol = cols.subject.length ? cols.subject[0]
+      : (/科目名称|^科目$/.test(nameHead) ? nameCol : -1);
+    var codeCol = partyCodeCol !== undefined ? partyCodeCol : (cols.code.length ? cols.code[0] : -1);
+    var dirCol = (function () {
+      if (picked && picked.positive) return -1;
+      // 优先同期间方向，通用方向次之；期初或发生额的方向不能用于期末。
+      var dirs = cols.dir.filter(function (c) {
+        var head = norm(heads[c]);
+        return !OPEN_WORDS.test(head) && (CLOSE_WORDS.test(head) || !PERIOD_WORDS.test(head));
+      });
+      var close = dirs.filter(function (c) { return CLOSE_WORDS.test(norm(heads[c])); })[0];
+      return close !== undefined ? close : (dirs.length ? dirs[0] : -1);
+    }());
+    var labelCols = [nameCol, subjectCol, codeCol, dirCol];
+    var firstRole = roleOf(heads[0]);
+    if (norm(heads[0]) === '序号' || (firstRole && /^(name|subject|code|dir)$/.test(firstRole.role))) {
+      if (labelCols.indexOf(0) < 0) labelCols.push(0);
+    }
 
     // 流水账：有日期/凭证/摘要，且金额是「借/贷」两列 —— 每行是一笔交易，不是每个单位的余额
     // 流水账：有日期/凭证/摘要，且要么有多列金额（金额 + 余额 = 逐笔累计），
@@ -381,33 +408,46 @@
     var isOpening = picked && picked.period === 'open';
     // 只有发生额：同样不是余额
     var isPeriod = picked && picked.kind === 'flow';
-    // 逐笔台账：有摘要/日期，只有一个「余额」列（没有期末字样），也没有科目列。
-    // 那种「余额」是逐笔累计余额，按单位相加会翻倍。
-    // 同一个名字出现多行，才说明是逐笔台账（一行一户的余额表不会重名）
-    var dupNames = false;
+    // 裸「余额」加交易列时，重名或完整的凭证信息都可能表明是逐笔累计余额。
+    var dupNames = false, conflictingCodes = false;
     (function () {
-      var seen = {};
+      var seen = Object.create(null);
+      var lastName = '';
       var start = best.rowIndex + (best.span === 2 ? 2 : 1);
       for (var dr = start; dr < rows.length; dr++) {
-        var dn = norm((rows[dr] || [])[nameCol]);
-        if (!dn) continue;
-        if (seen[dn]) { dupNames = true; break; }
-        seen[dn] = 1;
+        var row = rows[dr] || [];
+        var dn = norm(row[nameCol]);
+        if (isTotalRow(row, labelCols, dn || str(row[subjectCol]).trim() || str(row[codeCol]).trim())) continue;
+        if (!dn) {
+          // 余额明细的空名称会沿用上一户。空行和只有备注的行不算一笔。
+          if (lastName && amountCol >= 0 && toCents(row[amountCol]) !== null) dupNames = true;
+          continue;
+        }
+        lastName = dn;
+        var code = partyCodeCol === undefined ? '' : str(row[partyCodeCol]).trim();
+        if (seen[dn] !== undefined) {
+          dupNames = true;
+          if (code && seen[dn] && seen[dn] !== code) conflictingCodes = true;
+        }
+        if (code || seen[dn] === undefined) seen[dn] = code;
       }
     }());
 
     var pickedHead = picked && picked.amountCol >= 0
-      ? norm((rows[best.rowIndex] || [])[picked.amountCol]) : '';
+      ? norm(heads[picked.amountCol]) : '';
     // 台账：余额列可能是「余额（元）」「本币余额」「累计余额」——先剥掉币种和修饰再判断
     var ledgerHead = pickedHead
       .replace(/[（(][^）)]*[）)]/g, '')
       .replace(/人民币|本位币|本币|累计|元$/g, '');
-    var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(ledgerHead)
-      && !/期末|期初|年末|年初/.test(pickedHead) && dupNames;
+    var flowHeads = cols.flow.map(function (c) { return norm(heads[c]); });
+    var hasVoucherDetails = flowHeads.some(function (s) { return /日期$/.test(s); }) &&
+      flowHeads.some(function (s) { return /^(凭证(字号|编号|号码|号)|单据(编号|号码|号))$/.test(s); }) &&
+      flowHeads.some(function (s) { return s === '摘要'; });
+    var isLedger = /^(余额|结余)$/.test(ledgerHead) && (hasVoucherDetails || (cols.flow.length > 0 && dupNames));
 
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
-        (cols.code.length && /科目|项目/.test(norm((rows[best.rowIndex] || [])[cols.code[0]]))));
+        (cols.code.length && /科目|项目/.test(norm(heads[cols.code[0]]))));
 
     if (debitCol >= 0 && creditCol >= 0) problems.push('检测到借方、贷方两列，按 借−贷 合成净额');
     if (span === 2) problems.push('两级表头：期间取自上一行，借贷取自下一行');
@@ -419,29 +459,18 @@
       problems.push('表的金额单位写着「' + unitWord + '」——本工具只认元。请先把金额乘成元再导入；自动换算猜错就是一万倍的差错，所以这里不做。');
     }
 
-    // 宽表：好几列「…余额」并列、又没有总的「期末余额」列 —— 分不清该函哪个科目
-    var headOf = function (a) {
-      // 去掉「（元）」「人民币」这类后缀再判断
-      return norm((rows[best.rowIndex] || [])[a.c]).replace(/(人民币|元)$/, '');
-    };
-    var PERIOD_ONLY = /^(期初余额|年初余额|期初金额|期初|期末余额|年末余额|余额|期末数|期末金额|金额|期末)$/;
-    var balCols = cols.amount.filter(function (a) { return a.kind === 'balance' && !a.side; });
-    var hasGeneric = balCols.some(function (a) { return PERIOD_ONLY.test(headOf(a)); });
-    var subjBalCols = balCols.filter(function (a) { return !PERIOD_ONLY.test(headOf(a)); });
-    var isWide = subjBalCols.length >= 2 && !hasGeneric;
     if (isWide) {
-      problems.push('这张表有 ' + subjBalCols.length + ' 列科目余额（' + subjBalCols.map(function (a) {
-        return headOf(a);
-      }).join('、') + '），分不清该函哪一列——请只保留要函证的那一列，或加一列「期末余额」。');
+      problems.push('这张表的余额列有多种口径，分不清该函哪一列——请只保留要函证的余额列，或加一列总的「期末余额」。');
     }
     if (flowOnly) problems.push('这张表只有「发生额」，没有余额——函证金额通常取余额，请换成余额表');
-    if (isLedger) problems.push('这张表像是逐笔明细台账（有摘要/日期，只有一个「余额」），余额是逐笔累计的，按单位相加会翻倍——请换成按单位汇总的余额表');
+    if (conflictingCodes) problems.push('同名单位有不同的往来编码，无法确定能否合成一封函——请核对编码，同一家单位统一编码，不同单位用可区分的名称。');
+    if (isLedger && !conflictingCodes) problems.push('这张表像是逐笔明细台账（有摘要/日期，只有一个「余额」），余额是逐笔累计的，按单位相加会翻倍——请换成按单位汇总的余额表');
     if (cols.dir.length && (debitCol >= 0 || creditCol >= 0)) {
       problems.push('同时有借贷列和方向列，已按借贷两列算净额，方向列不再重复取反');
     }
 
     var usable = nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) &&
-      !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide && !isLedger;
+      !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide && !isLedger && !conflictingCodes;
 
     var kind = '';
     if (debitCol >= 0 || creditCol >= 0) kind = '余额';
@@ -450,18 +479,8 @@
     return {
       rowIndex: best.rowIndex, span: span,
       nameCol: nameCol, amountCol: amountCol,
-      subjectCol: cols.subject.length ? cols.subject[0]
-        : (/科目名称|^科目$/.test(nameHead) ? nameCol : -1),
-      codeCol: cols.code.length ? cols.code[0] : -1,
-      debitCol: debitCol, creditCol: creditCol,
-      dirCol: (function () {
-        if (!cols.dir.length) return -1;
-        // 「期初方向 / 期末方向」两列时，取期末那个
-        var hit = cols.dir.filter(function (c) {
-          return /期末|年末/.test(norm((rows[best.rowIndex] || [])[c]));
-        })[0];
-        return hit !== undefined ? hit : cols.dir[0];
-      }()),
+      subjectCol: subjectCol, codeCol: codeCol, labelCols: labelCols,
+      debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
       creditOnly: creditCol >= 0 && debitCol < 0,
       period: picked ? picked.period : '',
       usable: usable,
@@ -485,20 +504,35 @@
     }
     // 两级表头占两行，数据从再下一行开始；单级表头下一行就是数据
     var dataStart = header.rowIndex + (header.span === 2 ? 2 : 1);
-    // 名称/科目列常常按区块合并（一家单位占好几行），下面的行是空的。
-    // 记着上一个非空值往下沿用——只对名称和科目做，金额绝不动。
-    var lastByCol = {};
+    // 真实的名称合并范围可以证明空白行属于哪一家，不能按金额猜成合计。
+    var mergedNames = [], mergedAmounts = [];
+    (opts.merges || []).forEach(function (m) {
+      var col = m.s.c;
+      if (m.s.r < dataStart || col !== m.e.c || m.s.r === m.e.r) return;
+      var first = rows[m.s.r] || [];
+      for (var mr = m.s.r + 1; mr <= m.e.r && mr < rows.length; mr++) {
+        if (col === header.nameCol) mergedNames[mr] = str(first[col]).trim();
+        if (col !== header.amountCol && col !== header.debitCol && col !== header.creditCol) continue;
+        var below = rows[mr] || [];
+        if ((norm(below[header.nameCol]) && norm(below[header.nameCol]) !== norm(first[header.nameCol])) ||
+            (norm(below[header.subjectCol]) && norm(below[header.subjectCol]) !== norm(first[header.subjectCol]))) {
+          mergedAmounts.push(firstExcelRow + m.s.r);
+          break;
+        }
+      }
+    });
+    var lastName = '';
     var runSum = 0;    // 已经读过的金额累计，用来认合计行
     var runRows = 0;   // 累计了几行
     var ambiguous = [];  // 分不清是合计行还是续行的行号
+    var unmatchedNames = [];  // 无法归到上一户的行号
+    var labelCols = header.labelCols || [header.nameCol, header.subjectCol, header.codeCol, header.dirCol];
 
     for (var r = dataStart; r < rows.length; r++) {
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
       var rawName = str(row[header.nameCol]).trim();
-      var name = rawName;
-      if (name) lastByCol[header.nameCol] = name;
-      else name = lastByCol[header.nameCol] || '';
+      var name = rawName || mergedNames[r] || lastName;
       var subject = '', rawSubject = '';
       if (header.subjectCol >= 0) {
         // 科目不沿用：合并或留空时记成「未填科目」，比把钱记到上一行科目头上诚实
@@ -506,6 +540,11 @@
         rawSubject = subject;
       }
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
+      if (isTotalRow(row, labelCols, rawName || rawSubject || code)) {
+        skipped.push({ srcRow: excelRow, reason: '合计行', name: name });
+        continue;
+      }
+      if (rawName) lastName = rawName;
 
       var cents = null, rawAmount = '', how = '', unreadable = '';
 
@@ -551,24 +590,16 @@
         blank = true;
       }
       if (blank) continue;
-      var labelCols = [header.nameCol, header.subjectCol, header.codeCol, header.dirCol, 0];
-      if (isTotalRow(row, labelCols)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
 
-      // 没有单位名称、没有科目，但金额和上面累计对得上——这才是合计行。
-      // 只有一行时，分不清是「合计」还是同一户的又一行，不猜，交给上层拒表。
-      if (!rawName && !rawSubject && cents !== null && cents !== 0) {
+      // 同额或有几分尾差，都不足以证明没有标签的行是合计。
+      if (!rawName && !rawSubject && !mergedNames[r] && cents !== null && cents !== 0) {
         var diff = Math.abs(cents - runSum);
-        if (diff === 0 && runRows >= 2) {
-          skipped.push({ srcRow: excelRow, reason: '合计行', name: '' });
-          continue;
-        }
-        if (diff === 0 && runRows === 1) {
+        if ((diff === 0 && runRows >= 1) || (diff <= 100 && runRows >= 2)) {
           ambiguous.push(excelRow);
           continue;
         }
-        // 合计有尾差（几分钱）也是合计行
-        if (diff <= 100 && runRows >= 2) {
-          skipped.push({ srcRow: excelRow, reason: '合计行', name: '' });
+        if (name) {
+          unmatchedNames.push(excelRow);
           continue;
         }
       }
@@ -592,22 +623,27 @@
       });
     }
 
-    if (ambiguous.length) {
-      var ambMsg = '第 ' + ambiguous.join('、') + ' 行没有单位名称，金额又正好等于上面几行之和——' +
-        '分不清是合计行还是同一户的又一行。请在原表里补上单位名称，或删掉合计行，再导入。';
-      problems.push(ambMsg);
-      // 含糊就拒绝：整张表不可用，别让人拿着猜出来的数去发函
-      if (header) {
-        header.usable = false;
-        if (header.problems && header.problems.indexOf(ambMsg) < 0) header.problems.push(ambMsg);
-      }
+    var rejections = [];
+    if (ambiguous.length) rejections.push('第 ' + ambiguous.join('、') + ' 行没有单位名称，金额又与上面明细合计相同或接近——' +
+      '分不清是合计行还是同一户的又一行。请在原表里补上单位名称，或删掉合计行，再导入。');
+    if (unmatchedNames.length) rejections.push('第 ' + unmatchedNames.join('、') +
+      ' 行没有单位名称，金额也与上面的合计对不上。请在原表里核对并补上单位名称，再导入。');
+    if (mergedAmounts.length) rejections.push('第 ' + mergedAmounts.join('、') + ' 行的合并金额跨单位或科目，无法分配余额——请拆分合并格并按单位、科目填写金额。');
+    if (rejections.length) {
+      header.usable = false;
+      rejections.forEach(function (msg) {
+        problems.push(msg);
+        if (header.problems && header.problems.indexOf(msg) < 0) header.problems.push(msg);
+      });
     }
 
     if (skipped.length) {
       var noName = skipped.filter(function (s) { return s.reason === '没有单位名称'; }).length;
       var badAmt = skipped.filter(function (s) { return s.reason === '金额读不出'; }).length;
+      var totals = skipped.filter(function (s) { return s.reason === '合计行'; }).length;
       if (noName) problems.push(noName + ' 行有金额但没有单位名称，没有计入（请回原表核对）');
       if (badAmt) problems.push(badAmt + ' 行的金额读不出，没有计入');
+      if (totals) problems.push('跳过 ' + totals + ' 行合计行');
     }
     return { entities: entities, skipped: skipped, problems: problems, ambiguous: ambiguous };
   }

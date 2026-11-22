@@ -105,14 +105,16 @@ function state_forceInclude(name) {
   return true;
 }
 
-function xlsxOf(rows, sheetName) {
+function xlsxOf(rows, sheetName, merge) {
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sheetName || 'Sheet1');
+  const sheet = XLSX.utils.aoa_to_sheet(rows);
+  if (merge) sheet['!merges'] = [XLSX.utils.decode_range(merge)];
+  XLSX.utils.book_append_sheet(wb, sheet, sheetName || 'Sheet1');
   return new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
 }
 
-async function loadFile(rows, sheetName) {
-  payload = xlsxOf(rows, sheetName);
+async function loadFile(rows, sheetName, merge) {
+  payload = xlsxOf(rows, sheetName, merge);
   const f = el('file');
   f.files = [{ name: '往来余额.xlsx' }];
   fire('file', 'change');
@@ -339,6 +341,30 @@ async function loadFile(rows, sheetName) {
     ok(/900,000\.00/.test(list), '华远 = 1,000,000 − 300,000 + 200,000 = 900,000（实际：' + list.replace(/<[^>]+>/g, ' ').slice(0, 100) + '）');
     ok(/预收账款/.test(list), '合并区下面的科目也带出来了');
   }
+
+  console.log('\n[合并名称的逐笔台账要显示拒绝原因]');
+  el('selMode').value = 'all';
+  await loadFile([['客户名称', '摘要', '余额'], ['华远', '收款', 1000],
+    [null, '收款', 1500], [null, '收款', 2000]], '逐笔台账', 'A2:A4');
+  ok(/逐笔明细台账/.test(el('fileInfo').textContent), 'F3 显示逐笔余额不能相加的提示');
+  ok(el('genControl').disabled && el('genLetter').disabled, 'F3 禁用控制表和询证函');
+
+  console.log('\n[首列备注保留明细，合计行显示跳过数量]');
+  await loadFile([['备注', '客户名称', '期末余额'], ['价税合计', '华远', 1000],
+    [null, '东方', 500], [null, '合计', 1500]], '期末余额');
+  const balanceRows = el('listBox').innerHTML.match(/<tr[^>]*>[\s\S]*?<\/tr>/g) || [];
+  ok(balanceRows.some(row => row.includes('>华远</td>') && row.includes('>1,000.00</td>')) &&
+    balanceRows.some(row => row.includes('>东方</td>') && row.includes('>500.00</td>')),
+    'F4 列表显示华远 1,000 元和东方 500 元');
+  ok(/跳过 1 行合计行/.test(el('statBox').innerHTML), 'F4 在选样统计中显示合计行提示');
+  ok(!el('genControl').disabled && !el('genLetter').disabled, 'F4 两种导出均可用');
+
+  console.log('\n[空名称的余额对不上累计要阻止导出]');
+  await loadFile([['单位名称', '期末余额'], ['华远', 1000], ['东方', 500], [null, 1000]], '待核对');
+  ok(/第 4 行没有单位名称，金额也与上面的合计对不上/.test(el('fileInfo').textContent),
+    'F5 在导入处提示原表行号和金额不符原因');
+  ok(el('genControl').disabled && el('genLetter').disabled, 'F5 禁用两种导出，即使上一次导入的表可导出');
+
   console.log('\n' + '='.repeat(56));
   if (fail.length) {
     console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
