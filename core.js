@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.2.1';
+  var VERSION = '0.3.0';
 
   /* ---------------- 基础 ---------------- */
 
@@ -95,13 +95,12 @@
   }
 
   function isTotalName(name) {
-    var raw = norm(name);
+    // 括号必须在下 norm 之前剥掉：norm 会把括号当噪音删除，
+    // 「合计（本币）」会变成「合计本币」，之后再也认不出
+    var raw = norm(str(name).replace(/[（(][^）)]*[）)]/g, ''));
     if (!raw) return false;
-    // 先去掉干扰项：括号里的说明、币种、单位、空格
-    // 「合计（人民币元）」「人民币合计」「应收账款合计」都归到「合计」
     var s = raw
-      .replace(/[（(][^）)]*[）)]/g, '')
-      .replace(/人民币元|人民币|美元|欧元|本位币|原币|折算|单位|金额|数量|元/g, '')
+      .replace(/人民币元|人民币|美元|欧元|本位币|本币|原币|折算|含税|大写|单位|金额|数量|元/g, '')
       .replace(/[\s:：、,，.。]/g, '');
     if (!s) return false;
     // 一层层剥掉结尾的「数/额」：「合计数额」「合计累计数」都能归位
@@ -303,7 +302,7 @@
   /**
    * 找表头。返回各列位置 + usable（能不能用来发函）+ problems（提示，不影响 usable）。
    */
-  function detectHeader(rows) {
+  function detectHeader(rows, sheetName) {
     var limit = Math.min(rows.length, 20);
     var best = { rowIndex: -1, score: 0 };
 
@@ -330,24 +329,27 @@
 
     // 金额单位只认元。见到万元/千元/百万元（连同单位、金额、余额这类词）就拒绝：
     // 自动换算猜错就是一万倍的差错。页脚、列名后缀、注释里写的也算。
+    // 金额单位只认元。全表任何格子（含工作表名）出现「万元/千元/亿元/百万元」
+    // 就拒绝——不猜是标题、列名、页脚还是正文。宁可让人换算一次，不能差一万倍。
     var unitWord = '';
-    var UNIT_RE = /(单位|金额|余额|计量|为)\s*[:：]?\s*[（(]?\s*(人民币)?\s*(百万元|万元|千元)/;
-    for (var ur = 0; ur < rows.length && !unitWord; ur++) {
+    var UNIT_TOKEN = /(百万元|万元|千元|亿元|万\s*元|千\s*元)/;
+    var allText = [];
+    for (var ur = 0; ur < rows.length; ur++) {
       var cells = rows[ur] || [];
       for (var uc = 0; uc < cells.length; uc++) {
-        var us = str(cells[uc]).replace(/\s+/g, '');
-        if (!us) continue;
-        var um = UNIT_RE.exec(us);
-        if (um) { unitWord = um[3]; break; }
-        // 裸标记：「（万元）」「万元」「(人民币万元)」——标题格或表头尾格常见这种写法
-    var bare = /^[（(【\[〔]?(人民币|美元)?(百万元|万元|千元)[)）】\]〕]?[:：]?(整)?$/.exec(us);
-        if (bare) { unitWord = bare[2]; break; }
-        // 拆成两格：「金额单位」|「人民币万元」
-        var nxt = str(cells[uc + 1]).replace(/\s+/g, '');
-        if (/^(单位|金额单位|计量单位)$/.test(us) && /^(人民币)?(百万元|万元|千元)$/.test(nxt)) {
-          unitWord = nxt.replace(/^人民币/, '');
-          break;
-        }
+        var us = str(cells[uc]);
+        if (us) allText.push(us);
+      }
+    }
+    if (typeof sheetName !== 'undefined' && sheetName) allText.push(String(sheetName));
+    for (var ti = 0; ti < allText.length && !unitWord; ti++) {
+      var tm = UNIT_TOKEN.exec(allText[ti]);
+      if (tm) unitWord = tm[1].replace(/\s+/g, '');
+    }
+    if (!unitWord) {
+      // 「单位：万」「金额（万）」这种简写
+      for (var si = 0; si < allText.length && !unitWord; si++) {
+        if (/(单位|金额|余额)\s*[:：]?\s*[（(]?\s*[万亿]\s*[）)]?\s*$/.test(allText[si])) unitWord = '万/亿';
       }
     }
     // 名称列：客户/单位优先，其次泛称，最后才是科目名称
@@ -368,7 +370,7 @@
     // 要么金额列本身带借贷/发生额。
     // 只有「日期 + 期末余额」的一行一户表不是流水——那是带最后交易日的余额表。
     var hasSided = cols.amount.some(function (a) { return !!a.side; });
-    var hasBal = cols.amount.some(function (a) { return a.kind === 'balance' && !a.side; });
+    var hasBal = cols.amount.some(function (a) { return a.kind === 'balance'; });
     // 借贷两栏且没有余额列，才是分录式流水
     var sidedOrFlowAmt = hasSided && !hasBal;
     // 「日期 + 期初余额 + 期末余额」是带日期的余额表；
@@ -381,6 +383,19 @@
     var isPeriod = picked && picked.kind === 'flow';
     // 逐笔台账：有摘要/日期，只有一个「余额」列（没有期末字样），也没有科目列。
     // 那种「余额」是逐笔累计余额，按单位相加会翻倍。
+    // 同一个名字出现多行，才说明是逐笔台账（一行一户的余额表不会重名）
+    var dupNames = false;
+    (function () {
+      var seen = {};
+      var start = best.rowIndex + (best.span === 2 ? 2 : 1);
+      for (var dr = start; dr < rows.length; dr++) {
+        var dn = norm((rows[dr] || [])[nameCol]);
+        if (!dn) continue;
+        if (seen[dn]) { dupNames = true; break; }
+        seen[dn] = 1;
+      }
+    }());
+
     var pickedHead = picked && picked.amountCol >= 0
       ? norm((rows[best.rowIndex] || [])[picked.amountCol]) : '';
     // 台账：余额列可能是「余额（元）」「本币余额」「累计余额」——先剥掉币种和修饰再判断
@@ -388,7 +403,7 @@
       .replace(/[（(][^）)]*[）)]/g, '')
       .replace(/人民币|本位币|本币|累计|元$/g, '');
     var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(ledgerHead)
-      && !/期末|期初|年末|年初/.test(pickedHead);
+      && !/期末|期初|年末|年初/.test(pickedHead) && dupNames;
 
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
@@ -473,7 +488,9 @@
     // 名称/科目列常常按区块合并（一家单位占好几行），下面的行是空的。
     // 记着上一个非空值往下沿用——只对名称和科目做，金额绝不动。
     var lastByCol = {};
-    var runSum = 0;   // 已经读过的金额累计，用来认合计行
+    var runSum = 0;    // 已经读过的金额累计，用来认合计行
+    var runRows = 0;   // 累计了几行
+    var ambiguous = [];  // 分不清是合计行还是续行的行号
 
     for (var r = dataStart; r < rows.length; r++) {
       var row = rows[r] || [];
@@ -537,11 +554,23 @@
       var labelCols = [header.nameCol, header.subjectCol, header.codeCol, header.dirCol, 0];
       if (isTotalRow(row, labelCols)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
 
-      // 合计行：不看标签写在哪一列（业务员、账龄、备注都可能），
-      // 看「名称和科目都空，数又正好等于上面所有行之和」——这是合计行的结构特征
-      if (!rawName && !rawSubject && cents !== null && cents !== 0 && cents === runSum) {
-        skipped.push({ srcRow: excelRow, reason: '合计行', name: '' });
-        continue;
+      // 没有单位名称、没有科目，但金额和上面累计对得上——这才是合计行。
+      // 只有一行时，分不清是「合计」还是同一户的又一行，不猜，交给上层拒表。
+      if (!rawName && !rawSubject && cents !== null && cents !== 0) {
+        var diff = Math.abs(cents - runSum);
+        if (diff === 0 && runRows >= 2) {
+          skipped.push({ srcRow: excelRow, reason: '合计行', name: '' });
+          continue;
+        }
+        if (diff === 0 && runRows === 1) {
+          ambiguous.push(excelRow);
+          continue;
+        }
+        // 合计有尾差（几分钱）也是合计行
+        if (diff <= 100 && runRows >= 2) {
+          skipped.push({ srcRow: excelRow, reason: '合计行', name: '' });
+          continue;
+        }
       }
 
       if (!name) {
@@ -556,10 +585,22 @@
       }
 
       runSum += cents;
+      runRows++;
       entities.push({
         name: name, subject: subject, code: code,
         cents: cents, srcRow: excelRow, how: how
       });
+    }
+
+    if (ambiguous.length) {
+      var ambMsg = '第 ' + ambiguous.join('、') + ' 行没有单位名称，金额又正好等于上面几行之和——' +
+        '分不清是合计行还是同一户的又一行。请在原表里补上单位名称，或删掉合计行，再导入。';
+      problems.push(ambMsg);
+      // 含糊就拒绝：整张表不可用，别让人拿着猜出来的数去发函
+      if (header) {
+        header.usable = false;
+        if (header.problems && header.problems.indexOf(ambMsg) < 0) header.problems.push(ambMsg);
+      }
     }
 
     if (skipped.length) {
@@ -568,7 +609,7 @@
       if (noName) problems.push(noName + ' 行有金额但没有单位名称，没有计入（请回原表核对）');
       if (badAmt) problems.push(badAmt + ' 行的金额读不出，没有计入');
     }
-    return { entities: entities, skipped: skipped, problems: problems };
+    return { entities: entities, skipped: skipped, problems: problems, ambiguous: ambiguous };
   }
   /** 同名单位合并（一家客户可能挂多个科目），金额相加 */
   function mergeByName(entities) {

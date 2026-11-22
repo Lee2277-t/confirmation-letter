@@ -366,7 +366,7 @@ ok(s6h.problems.some(p => /万元/.test(p)), '要说清楚是单位的问题');
 
 console.log('\n[第七轮 1 非元单位一律拒绝]');
 const u1 = Core.detectHeader([['往来余额表（单位：元）'], ['注：超过100万元的客户请重点函证'], ['单位名称', '期末余额'], ['华远', 1286400.5]]);
-eq(u1.usable, true, '正文提到「100万元」不算单位标注');
+eq(u1.usable, false, '正文提到「万元」也一律拒——宁可多问一句，不能差一万倍');
 const u2 = Core.detectHeader([['往来余额表（单位：万元）'], ['单位名称', '期末余额'], ['华远', 128.64]]);
 eq(u2.usable, false, '标题写万元要拒绝');
 const u3 = Core.detectHeader([['往来余额表', '', '', '单位：千元'], ['单位名称', '期末余额'], ['华远', 128.64]]);
@@ -415,7 +415,7 @@ eq(uu2.usable, false, '列名后缀（万元）要拒');
 const uu3 = Core.detectHeader([['单位名称', '期末余额'], ['华远', 1286400.5], ['单位：万元']]);
 eq(uu3.usable, false, '页脚的单位声明也要拒');
 const uu4 = Core.detectHeader([['往来余额表（单位：元）'], ['注：超过100万元的客户请重点函证'], ['单位名称', '期末余额'], ['华远', 1286400.5]]);
-eq(uu4.usable, true, '正文提到「100万元」不算声明');
+eq(uu4.usable, false, '正文提到「万元」也拒（保守口径）');
 
 console.log('\n[第八轮 4 期初 + 期末（元）不能用「分不清」拒掉]');
 const g1 = Core.detectHeader([['客户名称', '期初余额', '期末余额（元）'], ['华远', 800, 1000]]);
@@ -486,15 +486,15 @@ ok(r9e5row && /未填科目/.test(String(r9e5row[2])), '控制表科目要包含
 
 console.log('\n[第九轮 6 逐笔「余额」台账要拒]');
 eq(Core.detectHeader([['客户名称', '摘要', '余额'], ['华远', '收款', 1000], ['华远', '收款', 1500]]).usable, false,
-  '摘要 + 单个「余额」是逐笔台账');
+  '摘要 + 单个「余额」+ 同一户多行是逐笔台账');
 eq(Core.detectHeader([['客户名称', '摘要', '期末余额'], ['华远', '往来', 1000]]).usable, true,
   '摘要 + 期末余额 仍然可用');
 
 
 console.log('\n[第十轮 1 逐笔台账带科目列也要拦]');
-eq(Core.detectHeader([['客户名称', '摘要', '科目', '余额'], ['华远', '收款', '应收账款', 1000]]).usable, false,
+eq(Core.detectHeader([['客户名称', '摘要', '科目', '余额'], ['华远', '收款', '应收账款', 1000], ['华远', '收款', '应收账款', 1500]]).usable, false,
   '带科目列的逐笔台账也是台账');
-eq(Core.detectHeader([['日期', '客户名称', '摘要', '科目', '余额'], ['2026-01-05', '华远', '收款', '应收账款', 1000]]).usable, false,
+eq(Core.detectHeader([['日期', '客户名称', '摘要', '科目', '余额'], ['2026-01-05', '华远', '收款', '应收账款', 1000], ['2026-02-05', '华远', '收款', '应收账款', 1500]]).usable, false,
   '带日期和科目也要拦');
 
 console.log('\n[第十轮 2 裸「（万元）」也要认]');
@@ -541,9 +541,9 @@ const two = Core.parseRows([['单位名称', '科目', '期末余额'], ['华远
 eq(Core.mergeByName(two.entities)[0].cents, 200000, '两笔各 1,000 要相加，不能跳过');
 
 console.log('\n[第十一轮 2 余额列的修饰写法也要判台账]');
-eq(Core.detectHeader([['客户名称', '日期', '摘要', '科目', '余额（元）'], ['华远', '01-05', '收款', '应收账款', 1000]]).usable, false,
+eq(Core.detectHeader([['客户名称', '日期', '摘要', '科目', '余额（元）'], ['华远', '01-05', '收款', '应收账款', 1000], ['华远', '02-05', '收款', '应收账款', 2300]]).usable, false,
   '「余额（元）」也是台账');
-eq(Core.detectHeader([['客户名称', '摘要', '本币余额'], ['华远', '收款', 1000]]).usable, false, '「本币余额」也是台账');
+eq(Core.detectHeader([['客户名称', '摘要', '本币余额'], ['华远', '收款', 1000], ['华远', '收款', 2300]]).usable, false, '「本币余额」也是台账');
 eq(Core.detectHeader([['客户名称', '摘要', '期末余额（元）'], ['华远', '往来', 1000]]).usable, true, '期末余额仍然可用');
 
 console.log('\n[第十一轮 3 万元标记的其他括号]');
@@ -557,6 +557,47 @@ eq(Core.detectHeader([['客户名称', '最后交易日期', '本期发生额', 
   '有余额列就不是流水');
 eq(Core.detectHeader([['日期', '客户名称', '摘要', '借方发生额', '贷方发生额'], ['2026-01-05', '华远', '收款', 1000, 0]]).usable, false,
   '只有借贷两栏才是流水');
+
+
+console.log('\n[第十二轮 1 万元的各种写法：出现就拒]');
+[['金额单位：（人民币）万元'], ['（人民币）万元'], ['单位：万'], ['金额（万）'], ['（亿元）'],
+ ['（人民币）千元'], ['人民币：万元'], ['单位：人民币（万元）']].forEach(function (cell) {
+  eq(Core.detectHeader([['往来表', '', '', cell[0]], ['单位名称', '期末余额'], ['华远', 128.64]]).usable, false,
+    cell[0] + ' 要拒');
+});
+eq(Core.detectHeader([['单位名称', '期末余额'], ['华远', 128.64]], '往来余额（万元）').usable, false,
+  '工作表名里的万元也要拒');
+
+console.log('\n[第十二轮 2 合计（本币）不能变成幽灵户]');
+['合计（本币）', '小计（本币）', '合计（折人民币）', '合计（折合）', '合计（含税）', '合计（大写）'].forEach(function (n) {
+  ok(Core.isTotalName(n), '「' + n + '」要认成合计行');
+});
+const w12rows = [['单位名称', '期末余额'], ['华远', 1000], ['东方', 500], ['合计（本币）', 1500]];
+const w12m = Core.mergeByName(Core.parseRows(w12rows, Core.detectHeader(w12rows), {}).entities);
+eq(w12m.length, 2, '合计（本币）不能成为第三户');
+eq(w12m.filter(e => e.name === '东方')[0].cents, 50000, '东方 500');
+
+console.log('\n[第十二轮 3 同额留空行不能静默吞掉]');
+const w13rows = [['单位名称', '期末余额'], ['华远', 1000], ['', 1000], ['东方', 500]];
+const w13h = Core.detectHeader(w13rows);
+const w13p = Core.parseRows(w13rows, w13h, {});
+eq(w13p.ambiguous.length, 1, '分不清的行要记下来');
+eq(w13h.usable, false, '而且整表拒绝，不能猜');
+
+console.log('\n[第十二轮 4 合计有尾差也要跳过]');
+const w14rows = [['单位名称', '业务员', '期末余额'], ['华远', '张三', 1000], ['东方', '李四', 500], ['', '合计', 1500.01]];
+const w14m = Core.mergeByName(Core.parseRows(w14rows, Core.detectHeader(w14rows), {}).entities);
+eq(w14m.filter(e => e.name === '东方')[0].cents, 50000, '尾差合计不加到东方');
+
+console.log('\n[第十二轮 5 借贷两列表加摘要列不是流水]');
+eq(Core.detectHeader([['客户名称', '摘要', '借方余额', '贷方余额'], ['华远', '往来', 1000, 0]]).usable, true,
+  '借方余额/贷方余额也是余额列');
+
+console.log('\n[第十二轮 6 一行一户的「余额」不算台账]');
+eq(Core.detectHeader([['客户名称', '最后交易日期', '余额'], ['华远', '2026-05-20', 1000]]).usable, true,
+  '一行一户带日期仍是余额表');
+eq(Core.detectHeader([['客户名称', '摘要', '余额'], ['华远', '收款', 1000], ['华远', '收款', 1500]]).usable, false,
+  '同一户多行才是台账');
 
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
