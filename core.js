@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.3.3';
+  var VERSION = '1.0.0';
 
   /* ---------------- 基础 ---------------- */
 
