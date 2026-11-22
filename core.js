@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.0';
+  var VERSION = '0.1.1';
 
   /* ---------------- 基础 ---------------- */
 
@@ -72,70 +72,113 @@
   var NAME_WORDS = /单位名称|客户名称|供应商名称|往来单位|单位|客户|供应商|户名|公司名称|名称/;
   var AMOUNT_WORDS = /期末余额|期末数|余额|金额|发生额/;
   var SUBJECT_WORDS = /科目|项目|类别|款项性质/;
-  var CODE_WORDS = /账号|账户|编码|代码|编号/;
-  var TOTAL_WORDS = /^(合计|总计|小计|合\s*计)$/;
+  // 「客户编码」「供应商编号」里也有「客户」「供应商」，不能当单位名称列
+  var CODE_WORDS = /编码|编号|代码|账号|卡号|账户/;
+  var DEBIT_WORDS = /借方余额|借方期末|借方/;
+  var CREDIT_WORDS = /贷方余额|贷方期末|贷方/;
 
   function isTotalName(name) {
-    return TOTAL_WORDS.test(norm(name));
-  }
-
-  function scoreRow(row) {
-    var name = 0, amount = 0, subject = 0, code = 0;
-    (row || []).forEach(function (cell) {
-      var t = norm(cell);
-      if (!t) return;
-      if (NAME_WORDS.test(t)) name++;
-      if (AMOUNT_WORDS.test(t)) amount++;
-      if (SUBJECT_WORDS.test(t)) subject++;
-      if (CODE_WORDS.test(t)) code++;
-    });
-    return { name: name, amount: amount, subject: subject, code: code,
-      total: name * 3 + amount * 2 + subject + code };
+    var n = norm(name);
+    if (!n) return false;
+    // 「合计（人民币）」「本期合计」「合  计」都要认，但不能把「合计贸易有限公司」当合计行
+    var core = '合计|总计|小计|共计';
+    var prefix = new RegExp('^(' + core + ')');
+    var m = prefix.exec(n);
+    if (m) {
+      var rest = n.slice(m[0].length);
+      if (!rest) return true;
+      return /^(人民币|元|金额|本页|本表|本期|本季|本年|累计|以上|以下|及){1,3}$/.test(rest) && rest.length <= 6;
+    }
+    var suffix = new RegExp('^(本页|本表|本期|本季|本年|累计|以上)(' + core + ')$');
+    return suffix.test(n);
   }
 
   /**
-   * 找表头。要求至少一个「名称」列 + 一个「金额」列。
+   * 一行能当表头吗？名称列和金额列必须是两列。
+   * 标题行「往来单位期末余额表」里「单位」和「余额」在同一格，
+   * 不这样排除就会把标题当表头，然后整张表读不出。
+   */
+  function analyzeRow(row) {
+    var nameCols = [], amountCols = [], subjectCols = [], codeCols = [];
+    var debitCols = [], creditCols = [];
+    (row || []).forEach(function (cell, c) {
+      var t = norm(cell);
+      if (!t) return;
+      var isCode = CODE_WORDS.test(t);
+      var isDebit = DEBIT_WORDS.test(t);
+      var isCredit = CREDIT_WORDS.test(t);
+      if (isDebit) { debitCols.push(c); return; }
+      if (isCredit) { creditCols.push(c); return; }
+      if (isCode) { codeCols.push(c); return; }
+      if (NAME_WORDS.test(t)) { nameCols.push(c); return; }
+      if (AMOUNT_WORDS.test(t)) { amountCols.push(c); return; }
+      if (SUBJECT_WORDS.test(t)) subjectCols.push(c);
+    });
+    // 借贷两列都在，就不用单列余额
+    var hasBoth = debitCols.length > 0 && creditCols.length > 0;
+    var score = nameCols.length * 3 + (hasBoth ? 3 : amountCols.length * 2) +
+      subjectCols.length + (codeCols.length ? 1 : 0);
+    if (!nameCols.length || (!amountCols.length && !hasBoth)) score = 0;
+    return {
+      score: score, nameCols: nameCols, amountCols: amountCols,
+      subjectCols: subjectCols, codeCols: codeCols,
+      debitCols: debitCols, creditCols: creditCols, hasBoth: hasBoth
+    };
+  }
+
+  /**
+   * 找表头。要求至少一个「名称」列 + 一个「金额」列（或借贷两列）。
    * 找不到就返回 rowIndex:-1 和原因，不硬猜。
    */
   function detectHeader(rows) {
     var limit = Math.min(rows.length, 20);
     var best = { rowIndex: -1, score: 0 };
     for (var r = 0; r < limit; r++) {
-      var sc = scoreRow(rows[r]);
-      if (sc.total > best.score) best = { rowIndex: r, score: sc.total, parts: sc };
+      var a = analyzeRow(rows[r]);
+      if (a.score > best.score) best = { rowIndex: r, score: a.score, a: a };
     }
     if (best.rowIndex < 0 || best.score < 5) {
       return { rowIndex: -1, nameCol: -1, amountCol: -1, subjectCol: -1, codeCol: -1,
+        debitCol: -1, creditCol: -1, dirCol: -1,
         problems: ['找不到能认的表头（需要一列单位/客户名称，一列余额或金额）'] };
     }
 
+    var a2 = best.a;
+    var nameCol = a2.nameCols[0];
+    var amountCol = -1, amountRank = -1, debitCol = -1, creditCol = -1, dirCol = -1;
     var row = rows[best.rowIndex] || [];
-    var nameCol = -1, amountCol = -1, subjectCol = -1, codeCol = -1;
-    var amountRank = -1;
-    for (var c = 0; c < row.length; c++) {
-      var t = norm(row[c]);
-      if (!t) continue;
-      if (nameCol < 0 && NAME_WORDS.test(t)) { nameCol = c; continue; }
-      if (AMOUNT_WORDS.test(t)) {
+
+    if (a2.hasBoth) {
+      debitCol = a2.debitCols[0];
+      creditCol = a2.creditCols[0];
+    } else {
+      a2.amountCols.forEach(function (c) {
+        var t = norm(row[c]);
         // 「期末余额」优先于「发生额」，避免拿到借方发生额
         var rank = /期末余额|期末数/.test(t) ? 3 : (/余额/.test(t) ? 2 : 1);
         if (rank > amountRank) { amountRank = rank; amountCol = c; }
-        continue;
-      }
-      if (subjectCol < 0 && SUBJECT_WORDS.test(t)) { subjectCol = c; continue; }
-      if (codeCol < 0 && CODE_WORDS.test(t)) { codeCol = c; }
+      });
+    }
+
+    // 方向列（借/贷）会影响金额符号
+    for (var c2 = 0; c2 < row.length; c2++) {
+      if (/^(方向|借贷方向|余额方向)$/.test(norm(row[c2]))) { dirCol = c2; break; }
     }
 
     var problems = [];
-    if (nameCol < 0) problems.push('没找到单位（客户/供应商）名称列');
-    if (amountCol < 0) problems.push('没找到余额或金额列');
+    if (debitCol < 0 && creditCol < 0 && amountCol < 0) problems.push('没找到余额或金额列');
+    if (debitCol >= 0 && creditCol >= 0) {
+      problems.push('检测到「借方余额」和「贷方余额」两列，按 借−贷 合成净额');
+    }
 
     return {
       rowIndex: best.rowIndex, nameCol: nameCol, amountCol: amountCol,
-      subjectCol: subjectCol, codeCol: codeCol, problems: problems
+      subjectCol: a2.subjectCols.length ? a2.subjectCols[0] : -1,
+      codeCol: a2.codeCols.length ? a2.codeCols[0] : -1,
+      debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
+      problems: problems
     };
   }
-
   /**
    * 按表头读出一行行对象。
    * 读不出金额的行不能丢：单独记进 skipped，并说明原因。
@@ -147,7 +190,9 @@
     var skipped = [];
     var problems = (header.problems || []).slice();
 
-    if (header.rowIndex < 0 || header.nameCol < 0 || header.amountCol < 0) {
+    var useDebitCredit = header.debitCol >= 0 && header.creditCol >= 0;
+    if (header.rowIndex < 0 || header.nameCol < 0 ||
+        (!useDebitCredit && header.amountCol < 0)) {
       return { entities: [], skipped: [], problems: problems };
     }
 
@@ -155,10 +200,28 @@
       var row = rows[r] || [];
       var excelRow = firstExcelRow + r;
       var name = str(row[header.nameCol]).trim();
-      var rawAmount = row[header.amountCol];
-      var amount = toCents(rawAmount);
       var subject = header.subjectCol >= 0 ? str(row[header.subjectCol]).trim() : '';
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
+
+      var cents = null, rawAmount = '', how = '';
+      if (useDebitCredit) {
+        var d = toCents(row[header.debitCol]);
+        var cr = toCents(row[header.creditCol]);
+        if (d === null && cr === null) cents = null;
+        else cents = (d || 0) - (cr || 0);
+        rawAmount = str(row[header.debitCol]) + '/' + str(row[header.creditCol]);
+        how = '借−贷';
+      } else {
+        rawAmount = row[header.amountCol];
+        cents = toCents(rawAmount);
+      }
+
+      // 方向列：写「贷」的当负数（往来表里预收/应付常见）
+      if (cents !== null && header.dirCol >= 0) {
+        var dir = norm(row[header.dirCol]);
+        if (/^贷/.test(dir) && cents > 0) cents = -cents;
+        else if (/^借/.test(dir) && cents < 0) cents = -cents;
+      }
 
       var blank = !name && str(rawAmount).trim() === '' && !subject;
       if (blank) continue;
@@ -166,19 +229,19 @@
 
       if (!name) {
         // 有金额没名字：不能静默丢，否则这笔钱在函证清单里彻底消失
-        if (amount !== null && amount !== 0) {
-          skipped.push({ srcRow: excelRow, reason: '没有单位名称', name: '', cents: amount });
+        if (cents !== null && cents !== 0) {
+          skipped.push({ srcRow: excelRow, reason: '没有单位名称', name: '', cents: cents });
         }
         continue;
       }
-      if (amount === null) {
-        skipped.push({ srcRow: excelRow, reason: '金额读不出', name: name, raw: str(rawAmount) });
+      if (cents === null) {
+        skipped.push({ srcRow: excelRow, reason: '金额读不出', name: name, raw: rawAmount });
         continue;
       }
 
       entities.push({
         name: name, subject: subject, code: code,
-        cents: amount, srcRow: excelRow
+        cents: cents, srcRow: excelRow, how: how
       });
     }
 
@@ -190,28 +253,32 @@
     }
     return { entities: entities, skipped: skipped, problems: problems };
   }
-
   /** 同名单位合并（一家客户可能挂多个科目），金额相加 */
   function mergeByName(entities) {
     var map = {}, order = [];
     entities.forEach(function (e) {
       var k = norm(e.name);
       if (!map[k]) {
-        map[k] = { name: e.name, cents: 0, subjects: [], subjectCents: {}, codes: [], srcRows: [], count: 0 };
+        map[k] = {
+          name: e.name, cents: 0, subjects: [], subjectCents: {},
+          codes: [], srcRows: [], count: 0, noSubjectCents: 0
+        };
         order.push(k);
       }
       map[k].cents += e.cents;
       map[k].count++;
-      if (e.subject && map[k].subjects.indexOf(e.subject) < 0) {
-        map[k].subjects.push(e.subject);
+      if (e.subject) {
+        if (map[k].subjects.indexOf(e.subject) < 0) map[k].subjects.push(e.subject);
+        map[k].subjectCents[e.subject] = (map[k].subjectCents[e.subject] || 0) + e.cents;
+      } else {
+        // 科目空着的钱也要有去处，否则函里「合计」比明细多出一截，对方一看就对不上
+        map[k].noSubjectCents += e.cents;
       }
-      if (e.subject) map[k].subjectCents[e.subject] = (map[k].subjectCents[e.subject] || 0) + e.cents;
       if (e.code && map[k].codes.indexOf(e.code) < 0) map[k].codes.push(e.code);
       if (e.srcRow) map[k].srcRows.push(e.srcRow);
     });
     return order.map(function (k) { return map[k]; });
   }
-
   /* ---------------- 选样 ---------------- */
 
   /** 可复现的伪随机：同一个种子抽出同一批，便于复核 */
@@ -261,6 +328,8 @@
     } else {
       var big = [], rest = [];
       pool.forEach(function (e) {
+        // 余额为 0 的户发函没有意义，抽样时不进池子（选「全部」时仍然给，由人自己决定）
+        if (e.cents === 0) return;
         if (Math.abs(e.cents) >= thresholdCents && thresholdCents > 0) big.push(e);
         else rest.push(e);
       });
@@ -289,6 +358,7 @@
           no: i + 1, name: e.name, cents: e.cents,
           subjects: e.subjects || (e.subject ? [e.subject] : []),
           subjectCents: e.subjectCents || (e.subject ? (function () { var o = {}; o[e.subject] = e.cents; return o; }()) : {}),
+          noSubjectCents: e.noSubjectCents || 0,
           codes: e.codes || (e.code ? [e.code] : []),
           srcRows: e.srcRows || (e.srcRow ? [e.srcRow] : []),
           reason: reasons[e.name] || ''
@@ -343,6 +413,19 @@
     head.push(['抽样说明', '共 ' + result.poolCount + ' 户，抽取 ' + result.count + ' 户，' +
       '金额覆盖率 ' + (result.coverage * 100).toFixed(1) + '%' +
       (opts.seed !== undefined ? '，随机种子 ' + opts.seed : ''), '', '', '', '', '', '', '', '']);
+
+    // 读表时发现的问题也要落进底稿：只在界面提示的话，归档之后没人知道这几行被跳过
+    var notes = opts.notes || [];
+    if (notes.length) {
+      head.push([]);
+      head.push(['读取情况（这些行没有参与函证，请回原表核对）']);
+      notes.forEach(function (n) { head.push([n]); });
+    }
+    var excl = opts.excludedNames || [];
+    if (excl.length) {
+      head.push([]);
+      head.push(['人工排除（未发函）：' + excl.join('、')]);
+    }
     return head;
   }
 
@@ -365,17 +448,29 @@
     };
     // 一家单位挂多个科目时，要按科目分别列金额；
     // 每行都写总额会把同一笔钱算成两遍。
-    var subs = (entity.subjects && entity.subjects.length) ? entity.subjects : [''];
-    var hasBreak = subs.length > 1 && entity.subjectCents;
+    // 科目空着的钱单列一行，否则明细加起来对不上合计。
+    var subs = (entity.subjects || []).slice();
+    var subAmt = entity.subjectCents || {};
+    var noSub = entity.noSubjectCents || 0;
+    if (noSub !== 0) subs.push('未填科目');
+    if (!subs.length) subs = ['往来款项'];
+
     var rows = subs.map(function (subj) {
-      var amt = hasBreak ? (entity.subjectCents[subj] || 0) : entity.cents;
-      return '<tr><td class="c">' + esc(subj || '往来款项') + '</td><td class="r">' +
+      var amt = subj === '未填科目' ? noSub : (subAmt[subj] !== undefined ? subAmt[subj] : entity.cents);
+      return '<tr><td class="c">' + esc(subj) + '</td><td class="r">' +
         esc(moneyText(amt)) + '</td></tr>';
     }).join('');
-    if (hasBreak) {
+
+    var sumShown = subs.reduce(function (a, subj) {
+      return a + (subj === '未填科目' ? noSub : (subAmt[subj] !== undefined ? subAmt[subj] : entity.cents));
+    }, 0);
+    if (subs.length > 1 && sumShown !== entity.cents) {
+      // 明细和总额对不上时必须让差额自己现形，不能悄悄用总额盖过去
+      rows += '<tr><td class="c">其他</td><td class="r">' + esc(moneyText(entity.cents - sumShown)) + '</td></tr>';
+    }
+    if (subs.length > 1) {
       rows += '<tr><td class="c"><b>合计</b></td><td class="r"><b>' + esc(moneyText(entity.cents)) + '</b></td></tr>';
     }
-
     return '' +
       '<section class="letter">' +
       '<h1>' + esc(opts.title || '企业询证函') + '</h1>' +
@@ -411,7 +506,9 @@
       }));
     }).join('\n');
     return '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">' +
-      '<title>' + (opts.client || '') + ' 询证函' + '</title>' +
+      '<title>' + str(opts.client || '').replace(/[<>&]/g, function (c) {
+        return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c];
+      }) + ' 询证函' + '</title>' +
       '<style>' + LETTER_CSS + '</style></head><body>' + pages + '</body></html>';
   }
 

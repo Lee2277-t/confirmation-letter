@@ -16,6 +16,7 @@
     entities: [],
     selected: [],
     excluded: {},      // 名字 -> true，手工排除的
+    forced: {},        // 名字 -> true，手工加进来的（本来没抽中）
     result: null,
     lastError: ''
   };
@@ -119,10 +120,24 @@
     state.entities = Core.mergeByName(state.parsed.entities || []);
   }
 
+  /** 门槛读不出来就明确报错——静默当 0 会变成「谁都不算大额」，底稿口径却是「≥0 全取」 */
+  function parseThreshold() {
+    var raw = String($('threshold').value || '').trim();
+    if (!raw) return { ok: false, msg: '金额门槛没填。填 0 会变成「谁都不算大额」，请填一个金额，例如 500000' };
+    var c = Core.toCents(raw);
+    if (c === null) return { ok: false, msg: '金额门槛「' + raw + '」读不出金额，请填数字，例如 500000（不支持「万」字）' };
+    if (c < 0) return { ok: false, msg: '金额门槛不能是负数' };
+    if (c === 0) return { ok: false, msg: '金额门槛不能是 0，否则一户都不会被当成大额' };
+    return { ok: true, cents: c };
+  }
+
   function currentOpts() {
+    var mode = $('selMode').value;
+    var thr = parseThreshold();
     return {
-      mode: $('selMode').value,
-      thresholdCents: Core.toCents($('threshold').value || 0) || 0,
+      mode: mode,
+      thresholdCents: thr.ok ? thr.cents : 0,
+      thresholdError: thr.ok ? '' : thr.msg,
       sampleSize: parseInt($('sampleSize').value, 10) || 0,
       seed: parseInt($('seed').value, 10) || 1
     };
@@ -130,13 +145,40 @@
 
   function recompute() {
     var opts = currentOpts();
+    if (opts.thresholdError && (opts.mode === 'mixed' || opts.mode === 'threshold')) {
+      state.result = null;
+      state.selected = [];
+      $('statBox').innerHTML = '<div class="note bad">' + esc(opts.thresholdError) + '</div>';
+      renderList();
+      refreshButtons();
+      return;
+    }
     var pool = state.entities.filter(function (e) { return !state.excluded[e.name]; });
     state.result = Core.selectEntities(pool, opts);
+    // 手工勾上但没被抽中的户要补进来，不然勾了等于没勾
+    var picked = {};
+    state.result.selected.forEach(function (s) { picked[s.name] = true; });
+    Object.keys(state.forced).forEach(function (name) {
+      if (picked[name]) return;
+      var e = state.entities.filter(function (x) { return x.name === name; })[0];
+      if (!e) return;
+      state.result.selected.push({
+        no: state.result.selected.length + 1, name: e.name, cents: e.cents,
+        subjects: e.subjects || [], subjectCents: e.subjectCents || {},
+        noSubjectCents: e.noSubjectCents || 0, codes: e.codes || [],
+        srcRows: e.srcRows || [], reason: '手工指定'
+      });
+      picked[name] = true;
+    });
+    state.result.selected.forEach(function (s, i) { s.no = i + 1; });
+    state.result.count = state.result.selected.length;
+    state.result.totalCents = state.result.selected.reduce(function (a, s) { return a + s.cents; }, 0);
     state.selected = state.result.selected;
     renderStats();
     renderList();
     refreshButtons();
   }
+
 
   function refreshButtons() {
     var ok = state.selected.length > 0;
@@ -197,8 +239,17 @@
     box.querySelectorAll('input[type=checkbox]').forEach(function (el) {
       el.addEventListener('change', function () {
         var name = el.getAttribute('data-name');
-        if (el.checked) delete state.excluded[name];
-        else state.excluded[name] = true;
+        var wasSelected = false;
+        (state.result ? state.result.selected : []).forEach(function (s) {
+          if (s.name === name && s.reason !== '手工指定') wasSelected = true;
+        });
+        if (el.checked) {
+          delete state.excluded[name];
+          if (!wasSelected) state.forced[name] = true;
+        } else {
+          state.excluded[name] = true;
+          delete state.forced[name];
+        }
         recompute();
       });
     });
@@ -214,11 +265,27 @@
       kind: '往来款项',
       thresholdCents: currentOpts().thresholdCents,
       sampleSize: currentOpts().sampleSize,
-      seed: currentOpts().seed
+      seed: currentOpts().seed,
+      notes: (state.parsed && state.parsed.problems) || [],
+      excludedNames: Object.keys(state.excluded || {})
     };
   }
 
+  function requireFields() {
+    var client = $('clientName').value.trim();
+    var cut = $('cutOff').value.trim();
+    var miss = [];
+    if (!client) miss.push('被审计单位');
+    if (!cut) miss.push('截止日');
+    if (miss.length) {
+      $('genInfo').textContent = '请先填：' + miss.join('、') + '。函上要盖章要写日期，空着发不出去。';
+      return false;
+    }
+    return true;
+  }
+
   function exportControl() {
+    if (!requireFields()) return;
     var opts = controlOpts();
     var rows = Core.controlRows(state.result, opts);
     var ws = XLSX.utils.aoa_to_sheet(rows);
@@ -232,6 +299,7 @@
   }
 
   function exportLetter() {
+    if (!requireFields()) return;
     var opts = controlOpts();
     var doc = Core.printDocument(state.result, opts);
     var blob = new Blob([doc], { type: 'text/html;charset=utf-8' });
@@ -258,6 +326,9 @@
         clearAll('这个文件里找不到「单位名称 + 余额」这样的表。函证对象要能认出单位名称和金额两列。');
         return;
       }
+      // 换了一家客户，上一家的单位名和截止日不能留着，否则函会盖错名字
+      $('clientName').value = '';
+      $('cutOff').value = '';
       setWorkbook(res, pick);
       $('fileInfo').textContent = res.fileName + ' · ' + pick.name;
       $('listPanel').classList.remove('hidden');
@@ -301,6 +372,23 @@
     parse();
     recompute();
   });
+
+  /** 供测试与将来可能的批量操作调用：等价于点某一行的勾选框 */
+  function setInclude(name, on) {
+    var wasSelected = false;
+    (state.result ? state.result.selected : []).forEach(function (s) {
+      if (s.name === name && s.reason !== '手工指定') wasSelected = true;
+    });
+    if (on) {
+      delete state.excluded[name];
+      if (!wasSelected) state.forced[name] = true;
+    } else {
+      state.excluded[name] = true;
+      delete state.forced[name];
+    }
+    recompute();
+  }
+  window.__setInclude = setInclude;
 
   // 启动时若没有文件，两个导出按钮都不可用
   clearAll('');

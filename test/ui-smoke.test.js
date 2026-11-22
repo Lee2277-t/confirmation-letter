@@ -99,6 +99,12 @@ function fire(id, type) {
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function state_forceInclude(name) {
+  if (typeof sandbox.window.__setInclude !== 'function') return false;
+  sandbox.window.__setInclude(name, true);
+  return true;
+}
+
 function xlsxOf(rows, sheetName) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sheetName || 'Sheet1');
@@ -195,6 +201,64 @@ async function loadFile(rows, sheetName) {
   eq(el('genControl').disabled, false, '示例数据能生成');
   ok(/示例/.test(el('fileInfo').textContent), '标明了是示例');
 
+
+  console.log('\n[门槛读不出来要当场报错，不能静默当 0]');
+  await loadFile([
+    ['单位名称', '期末余额'],
+    ['甲', 1000000],
+    ['乙', 800000],
+    ['丙', 300000],
+    ['丁', 50000]
+  ], '往来');
+  el('clientName').value = '某公司';
+  el('cutOff').value = '2026-06-30';
+  el('selMode').value = 'mixed';
+  el('sampleSize').value = '3';
+  el('threshold').value = '50万';
+  fire('threshold', 'change');
+  ok(/读不出金额/.test(el('statBox').innerHTML), '门槛写「50万」要报错（实际：' + el('statBox').innerHTML.replace(/<[^>]+>/g, '').slice(0, 60) + '）');
+  eq(el('genControl').disabled, true, '门槛不对时不能导出');
+  eq(el('genLetter').disabled, true, '同上');
+
+  el('threshold').value = '0';
+  fire('threshold', 'change');
+  ok(/不能是 0/.test(el('statBox').innerHTML), '门槛 0 也要拦');
+
+  el('threshold').value = '500000';
+  fire('threshold', 'change');
+  eq(el('genControl').disabled, false, '填对了就能导出');
+  ok(/>3</.test(el('statBox').innerHTML) || /3 户/.test(el('statBox').innerHTML), '2 户大额 + 1 户随机 = 3 户');
+  el('selMode').value = 'threshold';
+  fire('selMode', 'change');
+  ok(/>2</.test(el('statBox').innerHTML) || /2 户/.test(el('statBox').innerHTML), '纯阈值：50 万以上正好 2 户');
+
+  console.log('\n[没填被审计单位不能导出]');
+  el('clientName').value = '';
+  written = null;
+  fire('genControl', 'click');
+  ok(!written, '没填单位名不生成');
+  ok(/被审计单位/.test(el('genInfo').textContent), '提示要填被审计单位');
+  el('clientName').value = '某公司';
+
+  console.log('\n[换文件要清掉上一家的单位名]');
+  await loadFile([['单位名称', '期末余额'], ['戊', 100]], '另一张');
+  eq(el('clientName').value, '', '换文件后单位名清空，避免盖错名字');
+  eq(el('cutOff').value, '', '截止日也清空');
+
+  console.log('\n[手工勾选要能加不能只减]');
+  await loadFile([
+    ['单位名称', '期末余额'],
+    ['大户', 1000000],
+    ['小户', 10000]
+  ], '往来');
+  el('clientName').value = '某公司';
+  el('cutOff').value = '2026-06-30';
+  el('selMode').value = 'threshold';
+  el('threshold').value = '500000';
+  fire('threshold', 'change');
+  ok(/>1</.test(el('statBox').innerHTML), '阈值下只有大户');
+  state_forceInclude('小户');
+  ok(/>2</.test(el('statBox').innerHTML) || /2 户/.test(el('statBox').innerHTML), '手工勾上小户后变成 2 户');
   console.log('\n' + '='.repeat(56));
   if (fail.length) {
     console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');
