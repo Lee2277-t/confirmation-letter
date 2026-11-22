@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '1.0.0';
+  var VERSION = '1.0.1';
 
   /* ---------------- 基础 ---------------- */
 
@@ -81,12 +81,14 @@
   // 光写「单位」是列名，不能当标注跳过
   var UNIT_LABEL = /^(单位|金额单位|人民币|单位人民币)?(元|万元)$/;
 
-  /** 首列有独立合计标签和单位名称时，核对已读明细的金额。 */
-  function isTotalRow(row, header, rawName, cents, runSum, runRows) {
+  /** 首列为合计标签且单位有名称时，用组内明细金额核对小计。 */
+  function isTotalRow(row, header, rawName, cents, groupSum) {
     var standalone = /^(本页|本表|以上)?(合计|小计|总计|共计)$/;
     var first = str(row[0]).replace(/计\s*[（(][^（）()]*[）)]\s*$/, '计');
-    var firstIsTotal = standalone.test(norm(first));
-    if (firstIsTotal && (!rawName || (runRows > 0 && cents !== null && Math.abs(cents - runSum) <= 100))) return true;
+    var label = norm(first);
+    var firstIsTotal = standalone.test(label);
+    if (/^(本表|以上)?总计$|^(本表|以上)(合计|共计)$/.test(label)) return true;
+    if (firstIsTotal && (!rawName || (groupSum !== null && cents !== null && Math.abs(cents - groupSum) <= 500))) return true;
 
     var labelCols = header.labelCols || [header.nameCol, header.subjectCol, header.codeCol, header.dirCol];
     for (var i = 0; i < labelCols.length; i++) {
@@ -314,7 +316,7 @@
   /**
    * 找表头。返回各列位置 + usable（能不能用来发函）+ problems（提示，不影响 usable）。
    */
-  function detectHeader(rows, sheetName, merges) {
+  function detectHeader(rows, sheetName, merges, firstExcelRow) {
     var limit = Math.min(rows.length, 20);
     var best = { rowIndex: -1, score: 0 };
 
@@ -435,23 +437,26 @@
       .replace(/人民币|本位币|本币|累计|元$/g, '');
     // 裸「余额」加交易列时，同一户多行才按逐笔累计余额处理。
     var ledgerBalance = /^(余额|结余)$/.test(ledgerHead) && header.hasFlowColumns;
+    header.hasVoucherDetails = ledgerBalance && cols.flow.some(function (c) { return /凭证|单号|票号/.test(norm(heads[c])); }) &&
+      cols.flow.some(function (c) { return /摘要/.test(norm(heads[c])); });
     var dupNames = false, conflictingCodes = false;
+    var variantNotice = '';
     if (ledgerBalance || partyCodeCol !== undefined) {
       var seen = Object.create(null);
-      var namePrefixes = new Set();
+      var namePrefixes = new Map();
       var lastName = '';
-      var runSum = 0, runRows = 0;
+      var groupSum = null;
       var start = best.rowIndex + span;
       for (var dr = start; dr < rows.length; dr++) {
         var row = rows[dr] || [];
         var rawName = str(row[nameCol]).trim();
         var dn = norm(rawName);
         var cents = readRowAmount(row, header).cents;
-        if (isTotalRow(row, header, rawName, cents, runSum, runRows)) continue;
-        if (cents !== null && (dn || lastName)) {
-          runSum += cents;
-          runRows++;
+        if (isTotalRow(row, header, rawName, cents, groupSum)) {
+          groupSum = null;
+          continue;
         }
+        if (cents !== null && (dn || lastName)) groupSum = (groupSum || 0) + cents;
         if (!dn) {
           // 余额明细的空名称会沿用上一户。空行和只有备注的行不算一笔。
           if (lastName && cents !== null) dupNames = true;
@@ -459,22 +464,32 @@
         }
         lastName = dn;
         var code = partyCodeCol === undefined ? '' : str(row[partyCodeCol]).trim();
-        if (seen[dn] !== undefined) {
+        var entry = { name: rawName, row: (firstExcelRow || 1) + dr, code: code };
+        if (seen[dn]) {
           dupNames = true;
-          if (code && seen[dn] && seen[dn] !== code) conflictingCodes = true;
+          if (code && seen[dn].code && seen[dn].code !== code) conflictingCodes = true;
         }
-        if (code || seen[dn] === undefined) seen[dn] = code;
+        if (code || !seen[dn]) seen[dn] = entry;
         if (ledgerBalance && !dupNames) {
-          // 「华远-北京」或「华远（北京）」和「华远」同时出现才算同户线索。
-          var boundary = /[-－—–（(](?=\s*[^-－—–（）()\s])/g;
+          // 只有一个名称完整出现在另一名称的分隔符前，才提示核对。
+          var boundary = /[-－—–（(\s./、](?=\s*[^-－—–（）()\s./、])/g;
           var suffix;
           while ((suffix = boundary.exec(rawName))) {
-            if (suffix.index > 0) namePrefixes.add(norm(rawName.slice(0, suffix.index)));
+            var prefix = norm(rawName.slice(0, suffix.index));
+            if (prefix && prefix !== dn && !namePrefixes.has(prefix)) namePrefixes.set(prefix, entry);
           }
         }
       }
       if (ledgerBalance && !dupNames) {
-        dupNames = Array.from(namePrefixes).some(function (prefix) { return seen[prefix] !== undefined; });
+        Array.from(namePrefixes).some(function (pair) {
+          var base = seen[pair[0]], extended = pair[1];
+          if (!base) return false;
+          var earlier = base.row < extended.row ? base : extended;
+          var later = base.row < extended.row ? extended : base;
+          variantNotice = '第 ' + later.row + ' 行「' + later.name + '」与前面的「' + earlier.name + '」疑似同一户的不同写法。' +
+            '如果确实是两家公司，请把名称改成能区分的写法后重新导入；如果是同一户，请合并后再导入。';
+          return true;
+        });
       }
     }
     var isLedger = ledgerBalance && dupNames;
@@ -498,13 +513,14 @@
     }
     if (flowOnly) problems.push('这张表只有「发生额」，没有余额——函证金额通常取余额，请换成余额表');
     if (conflictingCodes) problems.push('同名单位有不同的往来编码，无法确定能否合成一封函——请核对编码，同一家单位统一编码，不同单位用可区分的名称。');
+    if (variantNotice) problems.push(variantNotice);
     if (isLedger && !conflictingCodes) problems.push('这张表像是逐笔明细台账（有摘要/日期，只有一个「余额」），余额是逐笔累计的，按单位相加会翻倍——请换成按单位汇总的余额表');
     if (cols.dir.length && (debitCol >= 0 || creditCol >= 0)) {
       problems.push('同时有借贷列和方向列，已按借贷两列算净额，方向列不再重复取反');
     }
 
     header.usable = nameCol >= 0 && (amountCol >= 0 || debitCol >= 0 || creditCol >= 0) &&
-      !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide && !isLedger && !conflictingCodes;
+      !isSubjectTable && !isFlow && !flowOnly && !isOpening && !unitWord && !isWide && !isLedger && !variantNotice && !conflictingCodes;
 
     header.amountKind = '';
     if (debitCol >= 0 || creditCol >= 0) header.amountKind = '余额';
@@ -580,8 +596,9 @@
       }
     });
     var lastName = '';
-    var runSum = 0;    // 已经读过的金额累计，用来认合计行
-    var runRows = 0;   // 累计了几行
+    var runSum = 0;    // 全表累计，用来核对无名称且无标签的行
+    var runRows = 0;
+    var groupSum = null;
     var ambiguous = [];  // 分不清是合计行还是续行的行号
     var unmatchedNames = [];  // 无法归到上一户的行号
     for (var r = dataStart; r < rows.length; r++) {
@@ -598,8 +615,9 @@
       var code = header.codeCol >= 0 ? str(row[header.codeCol]).trim() : '';
       var amount = readRowAmount(row, header);
       var cents = amount.cents, rawAmount = amount.raw;
-      if (isTotalRow(row, header, rawName, cents, runSum, runRows)) {
+      if (isTotalRow(row, header, rawName, cents, groupSum)) {
         skipped.push({ srcRow: excelRow, reason: '合计行', name: name, cents: cents, raw: rawAmount });
+        groupSum = null;
         continue;
       }
       if (rawName) lastName = rawName;
@@ -638,6 +656,7 @@
 
       runSum += cents;
       runRows++;
+      groupSum = (groupSum || 0) + cents;
       entities.push({
         name: name, subject: subject, code: code,
         cents: cents, srcRow: excelRow, how: amount.how

@@ -855,7 +855,7 @@ async function workbookRegressions() {
   await loadWorkbook([['首列小计', [['业务员', '客户名称', '期末余额'],
     ['张三', '华远', 1000], ['张三', '华远', 500], ['小计', '华远', 1501], ['小计', '东方', 1501.01]]]]);
   eq(exportedBalances(), JSON.stringify([['东方', '未填科目', 1501.01], ['华远', '未填科目', 1500]]),
-    'M1/N1 小计允许 1 元尾差，超过 1 元的有名行保留');
+    'M1/N1 第一个小计跳过，后面没有组内明细的有名行保留');
 
   const posting = ['2026-06-12', '记-003', '收货款', 1300];
   for (const name of ['华远-北京', '华远（北京）']) {
@@ -871,6 +871,63 @@ async function workbookRegressions() {
   ['余额表', [['单位名称', '期末余额'], ['华远', 1000000], ['东方', 500000]]]]);
   eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000000], ['东方', '未填科目', 500000]]),
     'M3 默认导出的控制表采用余额表的两户和金额');
+
+  console.log('\n[第十六轮 B1/B2/B3 XLSX 反例]');
+  const grouped = [['业务员', '客户名称', '期末余额'], ['张三', '华远', 1000],
+    ['张三', '华远', 500], ['小计', '华远', 1500], ['李四', '东方', 800], ['小计', '东方', 800]];
+  const groupBalances = JSON.stringify([['华远', '未填科目', 1500], ['东方', '未填科目', 800]]);
+  for (const firstColumn of ['业务员', '月份', '备注', '序号']) {
+    await loadWorkbook([['两组小计', [[firstColumn, ...grouped[0].slice(1)], ...grouped.slice(1)]]]);
+    eq(exportedBalances(), groupBalances, 'B1 首列「' + firstColumn + '」的同名两组小计不重复计入，合计 2,300 元');
+  }
+  ok(/第 4 行 1,500\.00 元、第 6 行 800\.00 元/.test(element('statBox').innerHTML), 'B1 两组小计均显示原表行号和金额');
+  await loadWorkbook([['两组小计', grouped.map((row, i) => i === 3 ? ['小计', '华远', 1501.01] : row)]]);
+  eq(exportedBalances(), groupBalances, 'B1 小计有 1.01 元尾差也不重复计入');
+  await loadWorkbook([['三组小计', [...grouped.slice(0, -1), ['小计', '东方', 805],
+    ['王五', '华远', 200], ['小计', '华远', 195]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1700], ['东方', '未填科目', 800]]),
+    'B1 首尾两次出现同一户时分别按组核对，小计正负 5 元尾差均可跳过');
+  await loadWorkbook([['两组小计', [...grouped.slice(0, -1), ['合计', '东方', 805.01]]]]);
+  eq(exportedBalances(), JSON.stringify([['东方', '未填科目', 1605.01], ['华远', '未填科目', 1500]]),
+    'B1 首列合计与组内累计相差 5.01 元时，有名明细仍保留');
+  await loadWorkbook([['两组小计', grouped.map((row, i) => i === 3 ? ['小计', null, 1500] : row), ['B3:B4']]]);
+  eq(exportedBalances(), groupBalances, 'B1 名称合并的小计也要重置组内累计');
+  await loadWorkbook([['总计带名字', [['业务员', '客户名称', '期末余额'], ['张三', '华远', 1000],
+    ['小计', '华远', 1000], ['李四', '东方', 800], ['小计', '东方', 800], ['总计', '东方', 1800]]]]);
+  eq(exportedBalances(), JSON.stringify([['华远', '未填科目', 1000], ['东方', '未填科目', 800]]),
+    'B1 带名字的总计行不加到东方，合计 1,800 元');
+  await loadWorkbook([['两级表头', [['业务员', '客户名称', '期末余额', null], [null, null, '借方', '贷方'],
+    ['张三', '甲', 500, 0], ['小计', '甲', 500, 0], ['李四', '乙', 0, 200], ['小计', '乙', 0, 200]],
+  ['A1:A2', 'B1:B2', 'C1:D1']]]);
+  eq(exportedBalances(), JSON.stringify([['甲', '未填科目', 500], ['乙', '未填科目', -200]]),
+    'B1 两级表头的小计按借贷净额比较，乙仍为 −200 元');
+
+  const variantHelp = '如果确实是两家公司，请把名称改成能区分的写法后重新导入；如果是同一户，请合并后再导入。';
+  for (const name of ['华远-北京', '华远—北京', '华远–北京', '华远（北京）', '华远(北京)',
+    '华远 北京', '华远.北京', '华远/北京', '华远、北京']) {
+    await loadWorkbook([['名称待核对', [voucherHeader, voucherRows[0], [name, ...posting], voucherRows[1]]]]);
+    eq(element('fileInfo').textContent, '第 3 行「' + name + '」与前面的「华远」疑似同一户的不同写法。' + variantHelp,
+      'B2 名称「' + name + '」说明实际拒收原因和两种处理方式');
+    ok(element('genControl').disabled && element('genLetter').disabled, 'B2 名称「' + name + '」待核对时停用两种导出');
+  }
+  await loadWorkbook([['偏移名称表', [voucherHeader, ['华远-北京', ...posting], ...voucherRows], null, 'B4']]);
+  ok(element('fileInfo').textContent.includes('第 6 行「华远」与前面的「华远-北京」'), 'B2 后缀名称在前也要报告工作簿里的实际行号');
+
+  const datedRows = [['客户名称', '日期', '余额'], ...Array.from({ length: 500 }, (_, i) =>
+    ['正式客户' + (i + 1), '2026-06-08', i + 1000])];
+  for (const template of [[simple[0]], [simple[0], ['示例公司', 100]]]) {
+    await loadWorkbook([['说明', template], ['明细', datedRows]]);
+    const balances = JSON.parse(exportedBalances() || '[]');
+    eq(balances.length, 500, 'B3 模板有 ' + (template.length - 1) + ' 户时，控制表仍导出明细的 500 户');
+    eq(balances.reduce((sum, row) => sum + row[2], 0), 624750, 'B3 控制表总额为 624,750 元');
+  }
+  await loadWorkbook([['说明', [simple[0], ['示例公司', 100]]], ['凭证明细', [voucherHeader,
+    ...datedRows.slice(1).map(([name, date, amount], i) => [name, date, '记-' + i, '收货款', amount])]]]);
+  eq(JSON.parse(exportedBalances() || '[]').length, 500, 'B3 只有一户示例时，凭证明细也按实际户数胜出');
+  const manyRowsOneAccount = [simple[0], ['华远', 100], ...Array.from({ length: 25 }, () => ['华远', 10])];
+  await loadWorkbook([['同户多行', manyRowsOneAccount], ['两户', [simple[0], ['东方', 500], ['海岚', 200]]]]);
+  eq(exportedBalances(), JSON.stringify([['东方', '未填科目', 500], ['海岚', '未填科目', 200]]),
+    'B3 多行同户合并后只算一户，默认选真实户数更多的表');
 }
 
 workbookRegressions().then(function () {

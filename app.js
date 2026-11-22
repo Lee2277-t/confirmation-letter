@@ -52,18 +52,19 @@
     var merges = ((ws && ws['!merges']) || []).map(function (m) {
       return { s: { r: m.s.r - origin.r, c: m.s.c - origin.c }, e: { r: m.e.r - origin.r, c: m.e.c - origin.c } };
     });
-    var header = Core.detectHeader(rows, name, merges);
+    var header = Core.detectHeader(rows, name, merges, origin.r + 1);
     // 读行才发现的歧义也要参加整表可用性判定。
     var parsed = header.usable ? Core.parseRows(rows, header, { firstExcelRow: origin.r + 1, merges: merges }) : null;
-    return { name: name, rowCount: rows.length, header: header, parsed: parsed };
+    var entities = header.usable ? Core.mergeByName(parsed.entities) : [];
+    return { name: name, rowCount: rows.length, header: header, parsed: parsed, entities: entities };
   }
 
   /**
    * 多张表都能读时挑哪张。
-   * 优先选余额表。同为余额表时，先看有没有流水列，再看行数。
+   * 先比可函证户数，同户数沿用原评分。有多户余额表时，凭证明细留给用户手动选择。
    */
   function pickSheet(wb) {
-    var best = null, usable = [], why = '';
+    var best = null, candidates = [], why = '', hasEmpty = false;
     wb.SheetNames.forEach(function (name) {
       var sheet = inspectSheet(wb, name), h = sheet.header;
       if (h.rowIndex < 0) return;
@@ -71,13 +72,27 @@
         if (!why) why = h.problems.join('；');
         return;
       }
-      usable.push(name);
+      if (!sheet.entities.length) {
+        hasEmpty = true;
+        return;
+      }
       // 行数最多加 2 分，无流水列的表加 3 分。
       sheet.score = 100 + (h.amountKind === '余额' ? 30 : 0) + (h.hasFlowColumns ? 0 : 3) +
         Math.min(sheet.rowCount, 2000) / 1000;
-      if (!best || sheet.score > best.score) best = sheet;
+      candidates.push(sheet);
     });
-    return { best: best, usable: usable, why: why };
+    var hasBalanceTable = candidates.some(function (sheet) {
+      return sheet.entities.length > 1 && sheet.header.amountKind === '余额' && !sheet.header.hasFlowColumns;
+    });
+    candidates.forEach(function (sheet) {
+      if (hasBalanceTable && sheet.header.hasVoucherDetails) return;
+      if (!best || sheet.entities.length > best.entities.length ||
+          (sheet.entities.length === best.entities.length && sheet.score > best.score)) best = sheet;
+    });
+    return {
+      best: best, usable: candidates.map(function (sheet) { return sheet.name; }),
+      why: why || (hasEmpty ? '表里没有读到可函证的单位。请补上单位名称和余额后重新导入。' : '')
+    };
   }
 
   /** CSV 可能是 GBK（Excel 另存的默认编码），先按 UTF-8 严解，失败再按 GBK */
@@ -131,7 +146,7 @@
   function setSheet(pick) {
     state.sheetName = pick.name;
     state.parsed = pick.parsed;
-    state.entities = Core.mergeByName(state.parsed.entities);
+    state.entities = pick.entities;
     state.excluded = {};
     state.forced = {};
     state.lastError = '';

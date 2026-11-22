@@ -381,8 +381,15 @@ async function loadFile(rows, sheetName, merge) {
   ok(el('genControl').disabled && el('genLetter').disabled, 'N2 同户多笔拒收后停用两种导出');
 
   await loadFile([voucherRows[0], ['华远-北京', '2026-06-12', '记-003', '收货款', 1300], ...voucherRows.slice(1)], '异名台账');
-  ok(/逐笔明细台账/.test(el('fileInfo').textContent), 'M2 带后缀的名称排在前面时也提示逐笔明细台账');
+  ok(/第 3 行「华远」与前面的「华远-北京」疑似同一户的不同写法/.test(el('fileInfo').textContent),
+    'M2 带后缀的名称排在前面时也提示名称待核对');
   ok(el('genControl').disabled && el('genLetter').disabled, 'M2 异名台账停用两种导出');
+
+  await loadFile([voucherRows[0], voucherRows[1], ['华远（北京）', '2026-06-12', '记-003', '收货款', 1300], voucherRows[2]], '名称待核对');
+  eq(el('fileInfo').textContent, '第 3 行「华远（北京）」与前面的「华远」疑似同一户的不同写法。' +
+    '如果确实是两家公司，请把名称改成能区分的写法后重新导入；如果是同一户，请合并后再导入。',
+    'B2 导入处显示涉事行号、两个名称及处理方法');
+  ok(el('genControl').disabled && el('genLetter').disabled, 'B2 名称存在歧义时停用两种导出');
 
   console.log('\n[M3 有流水列的可用表不会抢占余额表]');
   for (const [detailCount, balanceCount, balanceTotal] of [[40, 2, '1,500,000.00'], [3, 3, '1,500,800.00']]) {
@@ -402,6 +409,22 @@ async function loadFile(rows, sheetName, merge) {
   el('sheetSel').value = '逐笔明细';
   fire('sheetSel', 'change');
   ok(/ · 逐笔明细$/.test(el('fileInfo').textContent) && !el('genControl').disabled, 'M3 可手动切换仍可用的明细表');
+
+  console.log('\n[B3 空模板和示例行都不抢默认]');
+  for (const exampleRows of [[], [['示例公司', 100]]]) {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['单位名称', '期末余额'], ...exampleRows]), '说明');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['客户名称', '日期', '余额'],
+      ...Array.from({ length: 500 }, (_, i) => ['正式客户' + (i + 1), '2026-06-08', 1000 + i])]), '明细');
+    payload = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }));
+    el('file').files = [{ name: '带说明.xlsx' }];
+    fire('file', 'change');
+    await sleep(120);
+    ok(/value="明细" selected/.test(el('sheetSel').innerHTML), 'B3 说明有 ' + exampleRows.length + ' 户时默认选明细表');
+    ok(/可函证户数[\s\S]{0,40}>500</.test(el('statBox').innerHTML) && el('statBox').innerHTML.includes('>624,750.00<'),
+      'B3 默认显示 500 户和 624,750.00 元');
+    ok(!el('genControl').disabled && !el('genLetter').disabled, 'B3 明细表启用两种导出');
+  }
 
   console.log('\n[空名称的余额对不上累计要阻止导出]');
   await loadFile([['单位名称', '期末余额'], ['华远', 1000], ['东方', 500], [null, 1000]], '待核对');
