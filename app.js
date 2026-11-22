@@ -57,7 +57,8 @@
     wb.SheetNames.forEach(function (name) {
       var rows = sheetRows(wb, name);
       var h = Core.detectHeader(rows);
-      if (h.rowIndex < 0 || h.problems.length) return;
+      if (h.rowIndex < 0) return;
+      if (h.usable === false) return;
       var n = h.rowIndex >= 0 ? rows.length : 0;
       var score = 100 + n / 1000;
       if (!best || score > best.score) best = { name: name, rows: rows, header: h, score: score };
@@ -107,6 +108,7 @@
     state.header = pick.header;
     state.origin = sheetOrigin(res.wb, pick.name);
     state.excluded = {};
+    state.forced = {};
     state.lastError = '';
   }
 
@@ -173,6 +175,12 @@
     state.result.selected.forEach(function (s, i) { s.no = i + 1; });
     state.result.count = state.result.selected.length;
     state.result.totalCents = state.result.selected.reduce(function (a, s) { return a + s.cents; }, 0);
+    // 覆盖率要按「全部往来余额」算，不能按排除后的池子算：
+    // 否则把最大的那户排除掉，覆盖率会跳到 100%，底稿上等于说函证覆盖了全部
+    var allAbs = state.entities.reduce(function (a, e) { return a + Math.abs(e.cents); }, 0);
+    var selAbs = state.result.selected.reduce(function (a, s) { return a + Math.abs(s.cents); }, 0);
+    state.result.coverage = allAbs === 0 ? 0 : selAbs / allAbs;
+    state.result.poolCount = state.entities.length;
     state.selected = state.result.selected;
     renderStats();
     renderList();
@@ -323,7 +331,14 @@
       if (!res.ok) { clearAll('读不了这个文件：' + res.error); return; }
       var pick = pickSheet(res.wb);
       if (!pick) {
-        clearAll('这个文件里找不到「单位名称 + 余额」这样的表。函证对象要能认出单位名称和金额两列。');
+        // 能认出表头但不能用（比如是科目余额表）：把具体原因说出来，别只说「找不到」
+        var why = '';
+        res.wb.SheetNames.forEach(function (name) {
+          if (why) return;
+          var h = Core.detectHeader(sheetRows(res.wb, name));
+          if (h.rowIndex >= 0 && h.problems.length) why = h.problems.join('；');
+        });
+        clearAll(why || '这个文件里找不到「单位名称 + 余额」这样的表。函证对象要能认出单位名称和金额两列。');
         return;
       }
       // 换了一家客户，上一家的单位名和截止日不能留着，否则函会盖错名字

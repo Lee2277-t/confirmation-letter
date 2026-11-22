@@ -259,6 +259,41 @@ async function loadFile(rows, sheetName) {
   ok(/>1</.test(el('statBox').innerHTML), '阈值下只有大户');
   state_forceInclude('小户');
   ok(/>2</.test(el('statBox').innerHTML) || /2 户/.test(el('statBox').innerHTML), '手工勾上小户后变成 2 户');
+
+  console.log('\n[借贷两列的表在界面上要能用]');
+  await loadFile([
+    ['客户名称', '借方余额', '贷方余额'],
+    ['甲', 1000, 0],
+    ['乙', 0, 5000]
+  ], '往来');
+  el('selMode').value = 'all';
+  fire('selMode', 'change');
+  eq(el('genControl').disabled, false, '借贷两列的表能生成（上一版会整张拒掉）');
+  ok(/乙/.test(el('listBox').innerHTML), '列表里有贷方那户');
+  ok(/-5,000\.00/.test(el('listBox').innerHTML), '贷方余额显示为负数');
+
+  console.log('\n[科目余额表要拒，并说明原因]');
+  await loadFile([['科目编码', '科目名称', '期末余额'], ['1002', '银行存款', 1000]], '科目');
+  eq(el('genControl').disabled, true, '科目余额表不能发函');
+  ok(/科目余额表/.test(el('fileInfo').textContent), '提示说清楚是科目余额表（实际：' + el('fileInfo').textContent.slice(0, 50) + '）');
+
+  console.log('\n[手工勾选后覆盖率要重算]');
+  await loadFile([
+    ['单位名称', '期末余额'],
+    ['大户', 1000000],
+    ['小户', 10000]
+  ], '往来');
+  el('clientName').value = '某公司';
+  el('cutOff').value = '2026-06-30';
+  el('selMode').value = 'threshold';
+  el('threshold').value = '500000';
+  fire('threshold', 'change');
+  const covBefore = el('statBox').innerHTML.match(/([\d.]+)<span class="u">%/);
+  state_forceInclude('小户');
+  const covAfter = el('statBox').innerHTML.match(/([\d.]+)<span class="u">%/);
+  ok(covBefore && covAfter, '能读到覆盖率');
+  ok(covBefore && covAfter && covBefore[1] !== covAfter[1], '勾上小户后覆盖率要变（' + (covBefore && covBefore[1]) + '% → ' + (covAfter && covAfter[1]) + '%）');
+  ok(covAfter && Math.abs(parseFloat(covAfter[1]) - 100) < 0.05, '两户都函，覆盖率就是 100%');
   console.log('\n' + '='.repeat(56));
   if (fail.length) {
     console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

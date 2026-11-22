@@ -134,6 +134,52 @@ const run10 = seed => Core.selectEntities(pool10, { mode: 'sample', sampleSize: 
 eq(run10(7), run10(7), '同种子复现');
 ok(new Set([1, 2, 3, 4, 5, 6, 7, 8].map(run10)).size > 1, '不同种子确实不同');
 
+
+console.log('\n[第二轮 1 借/贷两列在界面层也要能用]');
+const h11 = Core.detectHeader([['客户名称', '借方余额', '贷方余额'], ['甲', 1000, 0]]);
+eq(h11.usable, true, '借贷两列的表要标记为可用（usable）');
+ok(h11.problems.length > 0, '但仍要提示「按借−贷合成净额」');
+const h12 = Core.detectHeader([['客户名称', '借方余额'], ['甲', 1000]]);
+eq(h12.usable, true, '只有一列借方余额也能用');
+eq(h12.amountCol, 1, '单侧借方当金额列');
+const h13 = Core.detectHeader([['客户名称', '借方发生额', '贷方发生额'], ['甲', 1000, 0]]);
+eq(h13.debitCol, -1, '「借方发生额」不是余额列');
+ok(h13.problems.some(p => /发生额/.test(p)), '用了发生额要提示');
+
+console.log('\n[第二轮 2 合计的更多写法]');
+['累计', '合计数', '合计额', '总额', '本年累计', '本期累计', '本期合计', '以上合计'].forEach(function (n) {
+  ok(Core.isTotalName(n), '「' + n + '」要认成合计行');
+});
+['累计折旧', '合计贸易有限公司', '小计部'].forEach(function (n) {
+  ok(!Core.isTotalName(n), '「' + n + '」不能误判');
+});
+
+console.log('\n[第二轮 4 标题行 + 单位：元]');
+const h41 = Core.detectHeader([
+  ['往来款项余额表', '', '', '单位：元'],
+  ['单位名称', '期末余额'],
+  ['甲', 5000]
+]);
+eq(h41.rowIndex, 1, '「单位：元」不参与评表头');
+eq(h41.usable, true, '表可用');
+const h42 = Core.detectHeader([['某某公司往来余额表', '金额单位：元'], ['单位名称', '期末余额'], ['甲', 1]]);
+eq(h42.rowIndex, 1, '两列标题行也不挡路');
+
+console.log('\n[第二轮 6 科目余额表要认出来并拒掉]');
+const h61 = Core.detectHeader([['科目编码', '科目名称', '期末余额'], ['1002', '银行存款', 1000]]);
+eq(h61.usable, false, '科目余额表不是往来表，不能拿去发函');
+ok(h61.problems.some(p => /科目余额表/.test(p)), '要说清楚为什么');
+
+console.log('\n[第二轮 7 纯随机也不抽 0 元户]');
+const zeroSample = Core.selectEntities(
+  [{ name: 'A', cents: 0 }, { name: 'B', cents: 100 }],
+  { mode: 'sample', sampleSize: 2, seed: 1 }
+);
+ok(!zeroSample.selected.some(s => s.name === 'A'), '0 元户不进纯随机');
+
+console.log('\n[第二轮 9 方向列与借贷两列不能双重取反]');
+const h91 = Core.detectHeader([['客户名称', '方向', '借方余额', '贷方余额'], ['甲', '贷', 1000, 0]]);
+ok(h91.problems.some(p => /方向列不再重复取反/.test(p)), '同时有两列时要提示');
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

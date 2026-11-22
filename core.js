@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.1.1';
+  var VERSION = '0.1.2';
 
   /* ---------------- 基础 ---------------- */
 
@@ -74,8 +74,11 @@
   var SUBJECT_WORDS = /科目|项目|类别|款项性质/;
   // 「客户编码」「供应商编号」里也有「客户」「供应商」，不能当单位名称列
   var CODE_WORDS = /编码|编号|代码|账号|卡号|账户/;
-  var DEBIT_WORDS = /借方余额|借方期末|借方/;
-  var CREDIT_WORDS = /贷方余额|贷方期末|贷方/;
+  // 只认「借方余额」这类；「借方发生额」是本期发生数，不是余额
+  var DEBIT_WORDS = /借方余额|借方期末|期末借方/;
+  var CREDIT_WORDS = /贷方余额|贷方期末|期末贷方/;
+  // 「单位：元」这种是计量单位标注，不是列名
+  var UNIT_LABEL = /^(单位|金额单位|人民币|元|万元|单位元|金额单位元|单位人民币元)$/;
 
   function isTotalName(name) {
     var n = norm(name);
@@ -87,10 +90,12 @@
     if (m) {
       var rest = n.slice(m[0].length);
       if (!rest) return true;
-      return /^(人民币|元|金额|本页|本表|本期|本季|本年|累计|以上|以下|及){1,3}$/.test(rest) && rest.length <= 6;
+      return /^(人民币|元|金额|本页|本表|本期|本季|本年|累计|以上|以下|及|数|额){1,3}$/.test(rest) && rest.length <= 6;
     }
-    var suffix = new RegExp('^(本页|本表|本期|本季|本年|累计|以上)(' + core + ')$');
-    return suffix.test(n);
+    var suffix = new RegExp('^(本页|本表|本期|本季|本年|累计|以上)(' + core + ')(数|额)?$');
+    if (suffix.test(n)) return true;
+    // 「累计」「总额」「合计数」这类简写
+    return /^(累计|总?计|合计数|总额|本年累计|本期累计|累计数)$/.test(n);
   }
 
   /**
@@ -104,6 +109,7 @@
     (row || []).forEach(function (cell, c) {
       var t = norm(cell);
       if (!t) return;
+      if (UNIT_LABEL.test(t)) return;
       var isCode = CODE_WORDS.test(t);
       var isDebit = DEBIT_WORDS.test(t);
       var isCredit = CREDIT_WORDS.test(t);
@@ -116,6 +122,9 @@
     });
     // 借贷两列都在，就不用单列余额
     var hasBoth = debitCols.length > 0 && creditCols.length > 0;
+    // 只有一列「借方余额」也照样能读：借方为正
+    var hasOneSide = !hasBoth && (debitCols.length > 0 || creditCols.length > 0);
+    if (hasOneSide) amountCols = amountCols.concat(debitCols, creditCols);
     var score = nameCols.length * 3 + (hasBoth ? 3 : amountCols.length * 2) +
       subjectCols.length + (codeCols.length ? 1 : 0);
     if (!nameCols.length || (!amountCols.length && !hasBoth)) score = 0;
@@ -167,8 +176,23 @@
 
     var problems = [];
     if (debitCol < 0 && creditCol < 0 && amountCol < 0) problems.push('没找到余额或金额列');
+    if (amountCol >= 0 && /发生额/.test(norm(row[amountCol]))) {
+      problems.push('金额列是「发生额」，不是余额——确认这是你要函证的数');
+    }
     if (debitCol >= 0 && creditCol >= 0) {
       problems.push('检测到「借方余额」和「贷方余额」两列，按 借−贷 合成净额');
+    }
+
+    // 借方余额、贷方余额、方向列三者同时出现时，符号会取反两次
+    if ((debitCol >= 0 || creditCol >= 0) && dirCol >= 0) {
+      problems.push('同时有借贷余额列和方向列，已按借贷两列算净额，方向列不再重复取反');
+    }
+
+    // 表头里写的是「科目名称」而不是单位/客户：这是科目余额表，不是往来明细
+    var nameHead = norm(row[nameCol]);
+    var subjectLike = /科目名称|科目|项目名称/.test(nameHead) && !/单位|客户|供应商|户名|往来/.test(nameHead);
+    if (subjectLike && a2.codeCols.length) {
+      problems.push('这张表看起来是科目余额表（科目编码 + 科目名称），不是往来单位明细');
     }
 
     return {
@@ -176,6 +200,7 @@
       subjectCol: a2.subjectCols.length ? a2.subjectCols[0] : -1,
       codeCol: a2.codeCols.length ? a2.codeCols[0] : -1,
       debitCol: debitCol, creditCol: creditCol, dirCol: dirCol,
+      usable: nameCol >= 0 && (amountCol >= 0 || debitCol >= 0) && !subjectLike,
       problems: problems
     };
   }
@@ -333,7 +358,7 @@
         if (Math.abs(e.cents) >= thresholdCents && thresholdCents > 0) big.push(e);
         else rest.push(e);
       });
-      if (mode === 'sample') { big = []; rest = pool.slice(); }
+      if (mode === 'sample') { big = []; rest = pool.filter(function (e) { return e.cents !== 0; }); }
       big.forEach(function (e) { selected.push(e); reasons[e.name] = '超阈值'; });
       var need = Math.max(0, sampleSize - selected.length);
       shuffle(rest, rand).slice(0, need).forEach(function (e) {
