@@ -522,6 +522,42 @@ const r10b = Core.parseRows([['客户名称', '期末余额'], ['华远', 1000],
 eq(Core.mergeByName(r10b.entities).length, 2, '合计行不进清单');
 eq(r10b.skipped.filter(x => x.reason === '合计行').length, 1, '合计行被记一笔');
 
+
+console.log('\n[第十一轮 1 合计行不看标签写在哪一列，看数据]');
+[
+  [['单位名称', '业务员', '期末余额'], ['华远', '张三', 1000], ['东方', '李四', 500], ['', '合计', 1500]],
+  [['单位名称', '账龄', '期末余额'], ['华远', '1年', 1000], ['东方', '2年', 500], ['', '合计', 1500]],
+  [['单位名称', '借方余额', '贷方余额', '备注'], ['华远', 1000, 0, ''], ['东方', 0, 500, ''], ['', 1000, 500, '合计']]
+].forEach(function (rows, i) {
+  const m = Core.mergeByName(Core.parseRows(rows, Core.detectHeader(rows), {}).entities);
+  eq(m.length, 2, '合计行不能变成一户（第 ' + (i + 1) + ' 张）');
+  eq(m.filter(e => e.name === '东方')[0].cents, i === 2 ? -50000 : 50000,
+    '东方金额不含合计（第 ' + (i + 1) + ' 张）');
+});
+
+console.log('\n[第十一轮 1b 同一户两笔相同金额不能被当合计行]');
+const two = Core.parseRows([['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000], ['', '预收账款', 1000]],
+  Core.detectHeader([['单位名称', '科目', '期末余额'], ['华远', '应收账款', 1000], ['', '预收账款', 1000]]), {});
+eq(Core.mergeByName(two.entities)[0].cents, 200000, '两笔各 1,000 要相加，不能跳过');
+
+console.log('\n[第十一轮 2 余额列的修饰写法也要判台账]');
+eq(Core.detectHeader([['客户名称', '日期', '摘要', '科目', '余额（元）'], ['华远', '01-05', '收款', '应收账款', 1000]]).usable, false,
+  '「余额（元）」也是台账');
+eq(Core.detectHeader([['客户名称', '摘要', '本币余额'], ['华远', '收款', 1000]]).usable, false, '「本币余额」也是台账');
+eq(Core.detectHeader([['客户名称', '摘要', '期末余额（元）'], ['华远', '往来', 1000]]).usable, true, '期末余额仍然可用');
+
+console.log('\n[第十一轮 3 万元标记的其他括号]');
+[['【万元】'], ['（万元）：'], ['[万元]'], ['〔万元〕']].forEach(function (cell) {
+  eq(Core.detectHeader([['往来表', '', '', cell[0]], ['单位名称', '期末余额'], ['华远', 128.64]]).usable, false,
+    cell[0] + ' 要拒');
+});
+
+console.log('\n[第十一轮 4 日期 + 本期发生额 + 期末余额 不是流水]');
+eq(Core.detectHeader([['客户名称', '最后交易日期', '本期发生额', '期末余额'], ['华远', '2026-05-20', 300, 1000]]).usable, true,
+  '有余额列就不是流水');
+eq(Core.detectHeader([['日期', '客户名称', '摘要', '借方发生额', '贷方发生额'], ['2026-01-05', '华远', '收款', 1000, 0]]).usable, false,
+  '只有借贷两栏才是流水');
+
 console.log('\n' + '='.repeat(56));
 if (fail.length) {
   console.log('失败 ' + fail.length + ' / ' + (pass + fail.length) + ' 项：');

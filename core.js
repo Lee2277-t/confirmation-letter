@@ -8,7 +8,7 @@
 }(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var VERSION = '0.2.0';
+  var VERSION = '0.2.1';
 
   /* ---------------- 基础 ---------------- */
 
@@ -340,7 +340,7 @@
         var um = UNIT_RE.exec(us);
         if (um) { unitWord = um[3]; break; }
         // 裸标记：「（万元）」「万元」「(人民币万元)」——标题格或表头尾格常见这种写法
-        var bare = /^[（(]?(人民币|美元)?(百万元|万元|千元)[)）]?$/.exec(us);
+    var bare = /^[（(【\[〔]?(人民币|美元)?(百万元|万元|千元)[)）】\]〕]?[:：]?(整)?$/.exec(us);
         if (bare) { unitWord = bare[2]; break; }
         // 拆成两格：「金额单位」|「人民币万元」
         var nxt = str(cells[uc + 1]).replace(/\s+/g, '');
@@ -367,7 +367,10 @@
     // 流水账：有日期/凭证/摘要，且要么有多列金额（金额 + 余额 = 逐笔累计），
     // 要么金额列本身带借贷/发生额。
     // 只有「日期 + 期末余额」的一行一户表不是流水——那是带最后交易日的余额表。
-    var sidedOrFlowAmt = cols.amount.some(function (a) { return !!a.side || a.kind === 'flow'; });
+    var hasSided = cols.amount.some(function (a) { return !!a.side; });
+    var hasBal = cols.amount.some(function (a) { return a.kind === 'balance' && !a.side; });
+    // 借贷两栏且没有余额列，才是分录式流水
+    var sidedOrFlowAmt = hasSided && !hasBal;
     // 「日期 + 期初余额 + 期末余额」是带日期的余额表；
     // 只有出现「没写期间的金额」或借贷/发生额列，才是流水
     var hasUnlabeledAmt = cols.amount.some(function (a) { return !a.balWord && !a.period; });
@@ -380,7 +383,12 @@
     // 那种「余额」是逐笔累计余额，按单位相加会翻倍。
     var pickedHead = picked && picked.amountCol >= 0
       ? norm((rows[best.rowIndex] || [])[picked.amountCol]) : '';
-    var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(pickedHead);
+    // 台账：余额列可能是「余额（元）」「本币余额」「累计余额」——先剥掉币种和修饰再判断
+    var ledgerHead = pickedHead
+      .replace(/[（(][^）)]*[）)]/g, '')
+      .replace(/人民币|本位币|本币|累计|元$/g, '');
+    var isLedger = cols.flow.length > 0 && /^(余额|结余)$/.test(ledgerHead)
+      && !/期末|期初|年末|年初/.test(pickedHead);
 
     var isSubjectTable = !nameIsCounterparty &&
       (/科目名称|项目名称|^科目$|^名称$/.test(nameHead) ||
@@ -465,6 +473,7 @@
     // 名称/科目列常常按区块合并（一家单位占好几行），下面的行是空的。
     // 记着上一个非空值往下沿用——只对名称和科目做，金额绝不动。
     var lastByCol = {};
+    var runSum = 0;   // 已经读过的金额累计，用来认合计行
 
     for (var r = dataStart; r < rows.length; r++) {
       var row = rows[r] || [];
@@ -528,6 +537,13 @@
       var labelCols = [header.nameCol, header.subjectCol, header.codeCol, header.dirCol, 0];
       if (isTotalRow(row, labelCols)) { skipped.push({ srcRow: excelRow, reason: '合计行', name: name || str(row[header.nameCol]) }); continue; }
 
+      // 合计行：不看标签写在哪一列（业务员、账龄、备注都可能），
+      // 看「名称和科目都空，数又正好等于上面所有行之和」——这是合计行的结构特征
+      if (!rawName && !rawSubject && cents !== null && cents !== 0 && cents === runSum) {
+        skipped.push({ srcRow: excelRow, reason: '合计行', name: '' });
+        continue;
+      }
+
       if (!name) {
         if (cents !== null && cents !== 0) {
           skipped.push({ srcRow: excelRow, reason: '没有单位名称', name: '', cents: cents });
@@ -539,6 +555,7 @@
         continue;
       }
 
+      runSum += cents;
       entities.push({
         name: name, subject: subject, code: code,
         cents: cents, srcRow: excelRow, how: how
