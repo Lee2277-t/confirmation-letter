@@ -7,6 +7,9 @@
 > 仓库：<https://github.com/Lee2277-t/confirmation-letter>
 > 直接下载：<https://github.com/Lee2277-t/confirmation-letter/releases/latest>
 
+![函证助手界面](docs/preview.png)
+
+**不想读文档？** [下载最新版 ZIP](../../releases/latest) → 解压 → 双击 index.html，就这样。仓库里也有 index.html，直接打开同样是完整功能。
 ---
 
 ## 它解决什么
@@ -172,3 +175,7 @@ v1.0.2
 ## 许可
 
 MIT
+
+---
+
+更多离线小工具（审计、文档、系统）见 [awesome-lee2277](https://github.com/Lee2277-t/awesome-lee2277)。
